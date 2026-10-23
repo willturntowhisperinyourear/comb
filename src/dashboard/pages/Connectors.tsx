@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.ts';
 import { Badge, Button, Empty, Field, Panel, statusTone } from '../ui.tsx';
+import CustomConnectorForm, { type InstalledConnector } from './CustomConnector.tsx';
 
 export default function ConnectorsPage() {
   const [plugins, setPlugins] = useState<any[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [log, setLog] = useState('');
   const [draft, setDraft] = useState<Record<string, any>>({});
-  const [custom, setCustom] = useState<any>({ id: '', repo: '', kind: 'web2api', port: 8099, base_path: '/v1' });
   const [showCustom, setShowCustom] = useState(false);
+  const [editId, setEditId] = useState('');
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
 
   const load = () => api.get('/plugins').then(setPlugins).catch((e) => setError(e.message));
@@ -42,67 +44,56 @@ export default function ConnectorsPage() {
     load();
   }
 
-  async function addCustom() {
-    if (!custom.id || !custom.repo) return setError('id and repo are required');
-    await api
-      .post('/plugins', {
-        ...custom,
-        name: custom.id,
-        install_cmd: custom.install_cmd ?? '',
-        run_cmd: custom.run_cmd ?? '',
-      })
-      .catch((e) => setError(e.message));
+  function installed(result: InstalledConnector) {
     setShowCustom(false);
+    setEditId('');
+    setNotice(
+      `${result.plugin?.name ?? result.plugin?.id} is installed${result.installing ? ' and running its install command' : ''}. ` +
+        (result.upstream_id ? 'Its upstream was created and will be refreshed.' : 'No upstream was created.'),
+    );
     load();
   }
 
   return (
     <>
       {error && <div className="note bad">{error}</div>}
+      {notice && <div className="note">{notice}</div>}
       <div className="note info">
         A connector is a repo on this host exposing an OpenAI-compatible port. comb stores it under{' '}
         <code>data/plugins/</code>, supervises the process, and keeps the last log. Commands run as your user: only
-        install repos you trust.
+        install sources you trust.
       </div>
 
       <Panel
         title="connectors"
         actions={
-          <Button onClick={() => setShowCustom((s) => !s)}>{showCustom ? 'close' : 'add custom repo'}</Button>
+          <Button
+            onClick={() => {
+              setEditId('');
+              setShowCustom((s) => !s);
+            }}
+          >
+            {showCustom ? 'close' : 'add custom connector'}
+          </Button>
         }
         className="panel"
       >
         {showCustom && (
-          <div style={{ marginBottom: 12 }}>
-            <div className="form-grid">
-              <Field label="id">
-                <input value={custom.id} onChange={(e) => setCustom({ ...custom, id: e.target.value })} placeholder="my-connector" />
-              </Field>
-              <Field label="git repo">
-                <input value={custom.repo} onChange={(e) => setCustom({ ...custom, repo: e.target.value })} placeholder="https://github.com/…" />
-              </Field>
-              <Field label="kind">
-                <select value={custom.kind} onChange={(e) => setCustom({ ...custom, kind: e.target.value })}>
-                  <option value="web2api">web2api</option>
-                  <option value="cli2api">cli2api</option>
-                  <option value="api2api">api2api</option>
-                </select>
-              </Field>
-              <Field label="port">
-                <input type="number" value={custom.port} onChange={(e) => setCustom({ ...custom, port: Number(e.target.value) })} />
-              </Field>
-              <Field label="install command">
-                <input value={custom.install_cmd ?? ''} onChange={(e) => setCustom({ ...custom, install_cmd: e.target.value })} placeholder="npm install" />
-              </Field>
-              <Field label="run command" hint="PORT is set in the environment">
-                <input value={custom.run_cmd ?? ''} onChange={(e) => setCustom({ ...custom, run_cmd: e.target.value })} placeholder="npm start -- --port $PORT" />
-              </Field>
+          <div className="note" style={{ marginBottom: 12 }}>
+            <div className="tiny" style={{ marginBottom: 8, lineHeight: 1.7 }}>
+              Pick a git repository or upload a release archive. comb extracts it into a staging folder, inspects the
+              tree, and pre-fills the fields below; nothing lands in <code>data/plugins</code> until you press install.
+              Choosing an existing id updates that connector's files in place, then reinstalls and refreshes it.
             </div>
-            <div style={{ marginTop: 8 }}>
-              <Button variant="primary" onClick={addCustom}>
-                add to catalog
-              </Button>
-            </div>
+            <CustomConnectorForm
+              key={editId || 'new'}
+              initialId={editId}
+              onInstalled={installed}
+              onCancel={() => {
+                setShowCustom(false);
+                setEditId('');
+              }}
+            />
           </div>
         )}
 
@@ -191,6 +182,19 @@ export default function ConnectorsPage() {
                       <Button variant="ghost" onClick={() => showLog(p.id)}>
                         {open === p.id ? 'hide' : 'log'}
                       </Button>
+                      {p.custom && (
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setEditId(p.id);
+                            setShowCustom(true);
+                            document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' });
+                          }}
+                          title="upload a new archive or repo for this connector; its files are replaced and install runs again"
+                        >
+                          replace files
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>

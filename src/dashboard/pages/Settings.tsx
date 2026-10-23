@@ -12,16 +12,97 @@ const STRATEGIES = [
   'quota_headroom',
 ];
 
+interface SchedulerState {
+  enabled: boolean;
+  interval_minutes: number;
+  running: boolean;
+  last_run: string | null;
+  next_run: string | null;
+  last_summary: null | {
+    at: string;
+    trigger: string;
+    upstreams: number;
+    refreshed: number;
+    calibrated: number;
+    failed: number;
+    healthy: number;
+    skipped: number;
+    warnings: string[];
+  };
+}
+
+const stamp = (value: string | null) => (value ? new Date(value).toLocaleString() : '—');
+
+const until = (value: string | null) => {
+  if (!value) return 'not scheduled';
+  const diff = Date.parse(value) - Date.now();
+  if (!Number.isFinite(diff)) return '—';
+  if (diff <= 0) return 'due now';
+  const mins = Math.round(diff / 60_000);
+  return mins >= 60 ? `in ${Math.round(mins / 60)}h` : `in ${Math.max(1, mins)}m`;
+};
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
+  const [sched, setSched] = useState<SchedulerState | null>(null);
+  const [intervalMin, setIntervalMin] = useState('60');
+  const [schedNote, setSchedNote] = useState('');
+  const [schedBusy, setSchedBusy] = useState(false);
 
   useEffect(() => {
     api.get('/settings').then(setSettings).catch((e) => setError(e.message));
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .get<SchedulerState>('/scheduler')
+        .then((s) => {
+          if (!alive) return;
+          setSched(s);
+          setIntervalMin((cur) => (cur === '60' ? String(s.interval_minutes) : cur));
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 4000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
   const set = (k: string, v: string) => setSettings((s) => ({ ...s, [k]: v }));
+
+  async function patchScheduler(body: Record<string, unknown>) {
+    setSchedBusy(true);
+    setSchedNote('');
+    try {
+      setSched(await api.patch<SchedulerState>('/scheduler', body));
+    } catch (e: any) {
+      setSchedNote(e.message);
+    } finally {
+      setSchedBusy(false);
+    }
+  }
+
+  async function runSchedulerNow() {
+    setSchedBusy(true);
+    setSchedNote('');
+    try {
+      const res = await api.post('/scheduler/run');
+      setSched((s) => (s ? { ...s, running: true, ...res.state } : res.state));
+      setSchedNote('started; results appear here when the pass finishes');
+    } catch (e: any) {
+      setSchedNote(e.message);
+    } finally {
+      setSchedBusy(false);
+    }
+  }
+
+  const last = sched?.last_summary;
 
   async function save() {
     setError('');
@@ -95,6 +176,89 @@ export default function SettingsPage() {
           </Button>
           {saved && <Badge tone="ok">saved</Badge>}
         </div>
+      </Panel>
+
+      <Panel
+        title="background scheduler"
+        actions={
+          <span className="inline">
+            <Badge tone={sched?.running ? 'warn' : sched?.enabled ? 'ok' : 'idle'}>
+              {sched?.running ? 'running' : sched?.enabled ? 'on' : 'off'}
+            </Badge>
+          </span>
+        }
+      >
+        <div className="tiny muted" style={{ marginBottom: 10, lineHeight: 1.7 }}>
+          Each pass refreshes every active upstream, re-discovers its models and calibrates only the emulated models
+          that are still uncalibrated. Calibrated models are left alone, and a pass never overlaps a manual refresh
+          or another pass.
+        </div>
+        <div className="form-grid">
+          <Field label="enabled" hint="runs in the background while comb is up">
+            <select
+              value={sched?.enabled ? 'on' : 'off'}
+              onChange={(e) => patchScheduler({ enabled: e.target.value === 'on', interval_minutes: Number(intervalMin) })}
+              disabled={schedBusy}
+            >
+              <option value="off">off</option>
+              <option value="on">on</option>
+            </select>
+          </Field>
+          <Field label="interval (minutes)" hint="1 to 1440">
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              value={intervalMin}
+              onChange={(e) => setIntervalMin(e.target.value)}
+            />
+          </Field>
+          <Field label="">
+            <div className="inline">
+              <Button
+                onClick={() => patchScheduler({ interval_minutes: Number(intervalMin) })}
+                disabled={schedBusy}
+              >
+                save interval
+              </Button>
+              <Button variant="primary" onClick={runSchedulerNow} disabled={schedBusy || sched?.running}>
+                run scheduler now
+              </Button>
+            </div>
+          </Field>
+        </div>
+        {schedNote && <div className="note tiny">{schedNote}</div>}
+        <table style={{ marginTop: 10 }}>
+          <tbody>
+            <tr>
+              <td className="muted tiny">last run</td>
+              <td className="mono-cell">{stamp(sched?.last_run ?? null)}</td>
+            </tr>
+            <tr>
+              <td className="muted tiny">next run</td>
+              <td className="mono-cell">
+                {sched?.enabled ? `${stamp(sched?.next_run ?? null)} (${until(sched?.next_run ?? null)})` : 'disabled'}
+              </td>
+            </tr>
+            {last && (
+              <tr>
+                <td className="muted tiny">last summary</td>
+                <td className="tiny">
+                  {last.trigger} · {last.upstreams} upstreams · {last.refreshed} refreshed · {last.healthy} healthy ·{' '}
+                  {last.calibrated} calibrated · {last.failed} failed · {last.skipped} skipped
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {last?.warnings?.length ? (
+          <div className="note tiny" style={{ marginTop: 8 }}>
+            {last.warnings.slice(0, 6).map((w, i) => (
+              <div key={i}>· {w}</div>
+            ))}
+            {last.warnings.length > 6 && <div className="muted">… and {last.warnings.length - 6} more</div>}
+          </div>
+        ) : null}
       </Panel>
 
       <Panel title="runtime">

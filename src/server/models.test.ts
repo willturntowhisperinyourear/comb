@@ -7,7 +7,7 @@ import { join } from 'node:path';
 process.env.COMB_DATA = mkdtempSync(join(tmpdir(), 'comb-models-'));
 
 const db = await import('./db.ts');
-const { addModels } = await import('./api.ts');
+const { addModels } = await import('./models.ts');
 
 function upstream(name: string, kind: string) {
   const id = db.randomUUID();

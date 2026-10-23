@@ -1,13 +1,23 @@
+function failure(res: Response, body: any): Error {
+  const message = body?.error?.message ?? body?.error ?? `${res.status} ${res.statusText}`;
+  return new Error(typeof message === 'string' ? message : JSON.stringify(message));
+}
+
 async function request<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch('/api' + path, {
     headers: { 'content-type': 'application/json' },
     ...init,
   });
   const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    const message = body?.error?.message ?? body?.error ?? `${res.status} ${res.statusText}`;
-    throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
-  }
+  if (!res.ok) throw failure(res, body);
+  return body as T;
+}
+
+/** Multipart upload; the browser sets the boundary, so no content-type here. */
+export async function postForm<T = any>(path: string, form: FormData): Promise<T> {
+  const res = await fetch('/api' + path, { method: 'POST', body: form });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw failure(res, body);
   return body as T;
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.ts';
 import { Badge, Button, Empty, Field, Panel, statusTone } from '../ui.tsx';
+import CustomConnectorForm, { type InstalledConnector } from './CustomConnector.tsx';
 
 type Line = { text: string; tone?: 'ok' | 'err' };
 
@@ -20,6 +21,7 @@ export default function SetupPage({ done }: { done: () => void }) {
   const [extras, setExtras] = useState<Record<string, string>>({});
   const [lines, setLines] = useState<Line[]>([]);
   const [busy, setBusy] = useState(false);
+  const [showCustom, setShowCustom] = useState(false);
 
   useEffect(() => {
     api.get('/plugins').then(setPlugins).catch(() => {});
@@ -27,6 +29,16 @@ export default function SetupPage({ done }: { done: () => void }) {
   }, []);
 
   const add = (text: string, tone?: Line['tone']) => setLines((l) => [...l, { text, tone }]);
+
+  const customInstalled = (result: InstalledConnector) => {
+    add(
+      `${result.plugin?.name ?? result.plugin?.id}: installed${result.upstream_id ? ' with an upstream' : ''}; its install command is running`,
+      'ok',
+    );
+    setShowCustom(false);
+    api.get('/plugins').then(setPlugins).catch(() => {});
+    api.get('/presets').then((d) => setPresets(d.presets)).catch(() => {});
+  };
   const toggle = (set: Set<string>, id: string) => {
     const next = new Set(set);
     next.has(id) ? next.delete(id) : next.add(id);
@@ -181,6 +193,20 @@ export default function SetupPage({ done }: { done: () => void }) {
           );
         })}
         {!plugins.length && <Empty>Loading connector catalog…</Empty>}
+
+        <div className="split-note" style={{ marginTop: 14, marginBottom: 8 }}>
+          <Badge tone="idle">custom source</Badge>
+          <span>
+            Not in the catalog? Point comb at any git repo or release archive; it analyzes the tree and pre-fills a
+            connector you can review before installing.
+          </span>
+        </div>
+        <Button onClick={() => setShowCustom((s) => !s)}>{showCustom ? 'close custom source' : 'add custom repo or archive'}</Button>
+        {showCustom && (
+          <div style={{ marginTop: 10 }}>
+            <CustomConnectorForm onInstalled={customInstalled} onCancel={() => setShowCustom(false)} />
+          </div>
+        )}
       </Panel>
 
       <Panel title="2 · upstreams to create">

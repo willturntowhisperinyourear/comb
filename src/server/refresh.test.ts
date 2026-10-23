@@ -8,7 +8,8 @@ import { join } from 'node:path';
 process.env.COMB_DATA = mkdtempSync(join(tmpdir(), 'comb-refresh-'));
 
 const db = await import('./db.ts');
-const api = await import('./api.ts');
+const refresh = await import('./refresh.ts');
+const modelsApi = await import('./models.ts');
 const plugins = await import('./plugins.ts');
 
 const server: Server = createServer((req, res) => {
@@ -76,7 +77,7 @@ test('connector capability wins over upstream kind', () => {
 
 test('refresh discovers, creates and calibrates uncalibrated emulated models', async () => {
   const id = upstream({});
-  const result = await api.refreshUpstream(id);
+  const result = await refresh.refreshUpstream(id);
 
   assert.deepEqual(result.discovered.sort(), ['model-a', 'model-b']);
   assert.equal(result.created.length, 2);
@@ -95,10 +96,10 @@ test('refresh discovers, creates and calibrates uncalibrated emulated models', a
 
 test('a second refresh skips calibrated models and keeps their rows', async () => {
   const id = upstream({ name: 'Second Web' });
-  await api.refreshUpstream(id);
+  await refresh.refreshUpstream(id);
   const before = db.all<any>('select * from models where upstream_id = ? order by id', id);
 
-  const again = await api.refreshUpstream(id);
+  const again = await refresh.refreshUpstream(id);
   assert.equal(again.created.length, 0);
   assert.equal(again.calibrated, 0);
   assert.equal(again.skipped, 2);
@@ -112,8 +113,8 @@ test('a second refresh skips calibrated models and keeps their rows', async () =
 
 test('force recalibrates calibrated models', async () => {
   const id = upstream({ name: 'Force Web' });
-  await api.refreshUpstream(id);
-  const forced = await api.refreshUpstream(id, true);
+  await refresh.refreshUpstream(id);
+  const forced = await refresh.refreshUpstream(id, { force: true });
   assert.equal(forced.calibrated, 2);
   assert.equal(forced.skipped, 0);
 });
@@ -125,7 +126,7 @@ test('a stopped connector still seeds preset ids, warns and skips probing', asyn
     preset: 'gemini-web',
     base_url: 'http://127.0.0.1:9/v1',
   });
-  const result = await api.refreshUpstream(id);
+  const result = await refresh.refreshUpstream(id);
 
   assert.equal(result.discovered.length, 0);
   assert.ok(result.warnings.some((w) => w.includes('Gemini Web')), 'warns about the stopped connector');
@@ -140,10 +141,10 @@ test('a stopped connector still seeds preset ids, warns and skips probing', asyn
 
 test('whitespace ids are rejected and existing rows are preserved', async () => {
   const id = upstream({ name: 'Manual Web' });
-  const added = api.addModels(id, ['model-a', 'bad id']);
+  const added = modelsApi.addModels(id, ['model-a', 'bad id']);
   assert.deepEqual(added.created, ['manual-web/model-a']);
   assert.deepEqual(added.invalid, ['bad id']);
   const row = db.get<any>('select * from models where id = ?', 'manual-web/model-a');
   assert.equal(row.calibration_status, 'uncalibrated');
-  assert.equal(api.addModels(id, ['model-a']).existing[0], 'manual-web/model-a');
+  assert.equal(modelsApi.addModels(id, ['model-a']).existing[0], 'manual-web/model-a');
 });

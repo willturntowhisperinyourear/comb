@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { all, createApiKey, get, nowIso, run, setting, setSetting, sha256 } from './db.ts';
-import { PROVIDER_PRESETS } from './catalog.ts';
+import { PLUGIN_CATALOG, PROVIDER_PRESETS } from './catalog.ts';
 import {
   calibrationFor,
   defaultToolsMode,
@@ -16,13 +16,24 @@ import {
   testModel,
 } from './plugins.ts';
 import { playgroundChat } from './proxy.ts';
-import { modelById, STRATEGIES, upstreamById } from './router.ts';
+import { modelById, STRATEGIES } from './router.ts';
+import { addModels } from './models.ts';
+import { refreshUpstream } from './refresh.ts';
+import { slugify } from './text.ts';
+import {
+  downloadArchive,
+  finalizeCustomConnector,
+  prepareArchivePath,
+  prepareGit,
+  readPrepared,
+  saveUploadedArchive,
+} from './connectors.ts';
+import { parseMultipart } from './upload.ts';
+import { isArchiveName } from './archive.ts';
+import { configureScheduler, runSchedulerTick, schedulerState } from './scheduler.ts';
 import type { AdapterKind, AuthMode, Strategy, ToolsMode } from '../shared/types.ts';
 
 export const api = Router();
-
-const slugify = (s: string) =>
-  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'upstream';
 
 const bool = (v: unknown) => (v ? 1 : 0);
 const num = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -222,93 +233,10 @@ api.post('/upstreams/:id/test', async (req, res) => {
   res.json(await testModel(models[0].id, String(req.body?.prompt ?? 'Say hello in five words.')));
 });
 
-/**
- * Refresh one upstream: ask the connector what it serves now, keep every model
- * row that already exists, seed the preset list when the connector is down or
- * returns nothing, then calibrate only the emulated models that still need it.
- */
-export async function refreshUpstream(upstreamId: string, force = false) {
-  const up = upstreamById(upstreamId);
-  if (!up) {
-    return {
-      error: 'upstream not found',
-      warnings: [] as string[],
-      discovered: [] as string[],
-      created: [] as string[],
-      existing: 0,
-      calibrated: 0,
-      failed: 0,
-      skipped: 0,
-    };
-  }
-
-  const preset = PROVIDER_PRESETS.find((p) => p.id === up.preset);
-  const plugin = up.plugin_id ? pluginById(up.plugin_id) : null;
-  const connectorRunning = plugin ? runningPlugins().includes(plugin.id) : false;
-  const warnings: string[] = [];
-
-  if (plugin && !connectorRunning) {
-    warnings.push(
-      `${plugin.name} is ${plugin.status}. Start it to discover live models; comb seeded the known ids instead.`,
-    );
-  }
-
-  let live: { discovered: string[]; created: string[]; error?: string } = { discovered: [], created: [] };
-  if (up.adapter === 'openai-http' && (!plugin || connectorRunning)) {
-    live = await discoverModels(up.id);
-    if (live.error) warnings.push(`live discovery failed: ${live.error}`);
-  } else if (!plugin) {
-    warnings.push('this upstream has no connector; live discovery was skipped');
-  }
-
-  let pluginSeed: string[] = [];
-  if (plugin) {
-    try {
-      const parsed = JSON.parse(plugin.models_hint || '[]');
-      if (Array.isArray(parsed)) pluginSeed = parsed.map(String);
-    } catch {
-      // A malformed hint is not worth failing the refresh over.
-    }
-  }
-  const seeded = addModels(up.id, [...(preset?.models ?? []), ...pluginSeed], defaultToolsMode(up));
-  if (!live.discovered.length && !seeded.created.length) {
-    warnings.push('nothing came back from discovery or the preset; add model ids by hand');
-  }
-
-  const rows = all<any>('select * from models where upstream_id = ? order by id', up.id);
-  // Probing a connector that is not running only produces "failed" noise, so
-  // refresh leaves those models uncalibrated until it is back up.
-  const canProbe = !plugin || connectorRunning;
-  if (!canProbe) {
-    warnings.push('calibration skipped while the connector is down; refresh again after starting it');
-  }
-  const candidates = canProbe
-    ? rows.filter((m) => m.tools_mode === 'emulate' && (force || m.calibration_status !== 'calibrated'))
-    : [];
-
-  let calibrated = 0;
-  let failed = 0;
-  for (const model of candidates) {
-    const report = await recalibrateModel(model.id);
-    if (report.status === 'calibrated') calibrated++;
-    else if (report.status === 'failed') failed++;
-  }
-
-  const created = [...new Set([...live.created, ...seeded.created])];
-  return {
-    discovered: live.discovered,
-    created,
-    existing: rows.length - created.length,
-    calibrated,
-    failed,
-    skipped: rows.length - candidates.length,
-    warnings,
-  };
-}
-
 api.post('/upstreams/:id/refresh', async (req, res) => {
-  const result = await refreshUpstream(req.params.id, !!req.body?.force);
-  if (result.error) return res.status(404).json(result);
+  const result = await refreshUpstream(req.params.id, { force: !!req.body?.force });
+  if (result.error === 'upstream not found') return res.status(404).json(result);
+  if (result.error) return res.status(409).json(result);
   res.json(result);
 });
 
@@ -343,56 +271,6 @@ api.get('/models', (_req, res) => {
     ),
   );
 });
-
-/**
- * Adds model ids by hand. Connectors lag behind the provider: a web2api repo
- * may still list last quarter's ids, while the web app already serves a new
- * one. Nothing upstream has to know the model name, so the operator can just
- * type it in and comb will route to it.
- */
-export function addModels(upstreamId: string, names: unknown, toolsMode?: string) {
-  const up = get<any>('select * from upstreams where id = ?', upstreamId);
-  if (!up) return { created: [] as string[], existing: [] as string[], invalid: [] as string[], error: 'upstream not found' };
-  const slug = slugify(up.name);
-  const mode: ToolsMode = ['native', 'emulate', 'off'].includes(String(toolsMode))
-    ? (String(toolsMode) as ToolsMode)
-    : defaultToolsMode(up);
-  const created: string[] = [];
-  const existing: string[] = [];
-  const invalid: string[] = [];
-
-  const list = Array.isArray(names) ? names : [names];
-  for (const raw of list) {
-    const name = String(raw ?? '').trim().replace(new RegExp(`^${slug}/`), '');
-    if (!name || /\s/.test(name)) {
-      if (String(raw ?? '').trim()) invalid.push(String(raw));
-      continue;
-    }
-    const id = `${slug}/${name}`;
-    if (modelById(id)) {
-      if (!existing.includes(id)) existing.push(id);
-      continue;
-    }
-    run(
-      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant,
-         calibration_status, calibrated_at, caps, created_at)
-       values(?,?,?,?,?,?,?,?,?,?,?)`,
-      id,
-      up.id,
-      name,
-      name,
-      128000,
-      mode,
-      setting('default_tool_variant', 'xml'),
-      calibrationFor(mode),
-      null,
-      JSON.stringify({ added_manually: true }),
-      nowIso(),
-    );
-    created.push(id);
-  }
-  return { created, existing, invalid };
-}
 
 api.post('/models', async (req, res) => {
   const b = req.body ?? {};
@@ -601,6 +479,9 @@ api.get('/plugins', (_req, res) => {
     all<any>('select * from plugins order by kind, name').map((p) => ({
       ...p,
       running: runningPlugins().includes(p.id),
+      // Custom sources can be replaced from the dashboard; catalog entries
+      // are installed from their repo and must not be overwritten by upload.
+      custom: !PLUGIN_CATALOG.some((c) => c.id === p.id),
     })),
   );
 });
@@ -662,6 +543,95 @@ api.post('/plugins', (req, res) => {
     nowIso(),
   );
   res.status(201).json({ ok: true });
+});
+
+// ------------------------------------------------- custom connectors
+
+/** Multipart, raw binary, or base64 JSON. Files land in the staging area. */
+api.post('/connectors/upload', async (req, res) => {
+  try {
+    const contentType = String(req.headers['content-type'] ?? '');
+    let filename = '';
+    let data: Buffer | null = null;
+
+    if (Buffer.isBuffer(req.body)) {
+      if (contentType.includes('multipart/form-data')) {
+        const parsed = parseMultipart(req.body, contentType);
+        if (!parsed.file) return res.status(400).json({ error: 'no file part in the upload' });
+        filename = parsed.file.filename;
+        data = parsed.file.data;
+      } else {
+        filename = String(req.headers['x-filename'] ?? 'archive.zip');
+        data = req.body;
+      }
+    } else if (req.body?.data_base64) {
+      filename = String(req.body.filename ?? 'archive.zip');
+      data = Buffer.from(String(req.body.data_base64), 'base64');
+    } else if (req.body?.archive_path) {
+      const prepared = await prepareArchivePath(String(req.body.archive_path));
+      return res.json(prepared);
+    }
+
+    if (!data || !filename) return res.status(400).json({ error: 'a file is required' });
+    if (!isArchiveName(filename)) {
+      return res.status(400).json({ error: 'unsupported archive type; use .zip, .tar.gz, .tgz, .tar, .rar or .7z' });
+    }
+    if (data.length > 200 * 1024 * 1024) return res.status(413).json({ error: 'archive is larger than 200 MB' });
+
+    const file = saveUploadedArchive(filename, data);
+    res.json(await prepareArchivePath(file, filename));
+  } catch (err: any) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+});
+
+/** Stage and inspect a git repo, archive path or archive URL without installing. */
+api.post('/connectors/analyze', async (req, res) => {
+  const b = req.body ?? {};
+  try {
+    if (b.staging_id) {
+      const prepared = readPrepared(String(b.staging_id));
+      if (!prepared) return res.status(404).json({ error: 'staging entry not found or expired' });
+      return res.json(prepared);
+    }
+    if (b.git_url) return res.json(await prepareGit(String(b.git_url)));
+    if (b.archive_url) {
+      const file = await downloadArchive(String(b.archive_url));
+      return res.json(await prepareArchivePath(file, String(b.archive_url)));
+    }
+    if (b.archive_path) return res.json(await prepareArchivePath(String(b.archive_path)));
+    res.status(400).json({ error: 'one of git_url, archive_url, archive_path or staging_id is required' });
+  } catch (err: any) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+});
+
+/** Move an analyzed staging tree into data/plugins/<id> and install it. */
+api.post('/connectors/install', (req, res) => {
+  try {
+    const result = finalizeCustomConnector(req.body ?? {});
+    res.status(201).json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+});
+
+// ---------------------------------------------------------------- scheduler
+
+api.get('/scheduler', (_req, res) => {
+  res.json(schedulerState());
+});
+
+api.patch('/scheduler', (req, res) => {
+  res.json(configureScheduler(req.body ?? {}));
+});
+
+api.post('/scheduler/run', (_req, res) => {
+  if (schedulerState().running) {
+    return res.status(409).json({ error: 'a scheduler run is already in progress', state: schedulerState() });
+  }
+  void runSchedulerTick('manual');
+  res.status(202).json({ started: true, state: schedulerState() });
 });
 
 // -------------------------------------------------------------------- usage

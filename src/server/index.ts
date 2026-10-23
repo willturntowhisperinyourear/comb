@@ -4,10 +4,14 @@ import { join } from 'node:path';
 import { api } from './api.ts';
 import { proxy } from './proxy.ts';
 import { DATA_DIR, setting } from './db.ts';
+import { cleanStaging } from './connectors.ts';
+import { startScheduler } from './scheduler.ts';
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8mb' }));
+// Archive uploads arrive as multipart or raw bytes; 200 MB matches the API limit.
+app.use(express.raw({ type: ['multipart/form-data', 'application/octet-stream'], limit: '200mb' }));
 
 app.use('/api', api);
 app.use(proxy);
@@ -30,6 +34,8 @@ const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '127.0.0.1';
 
 app.listen(port, host, () => {
+  cleanStaging();
+  startScheduler();
   const key = setting('bootstrap_api_key', '');
   console.log(`comb listening on http://${host}:${port}`);
   console.log(`data dir: ${DATA_DIR}`);

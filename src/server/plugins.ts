@@ -24,6 +24,10 @@ function log(id: string, line: string) {
   }
 }
 
+export function appendPluginLog(id: string, line: string) {
+  log(id, line);
+}
+
 export function pluginLog(id: string, lines = 120): string {
   const p = logPath(id);
   if (!existsSync(p)) return '';
@@ -147,6 +151,9 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
   child.stdout?.on('data', (b) => log(id, b.toString().trimEnd()));
   child.stderr?.on('data', (b) => log(id, b.toString().trimEnd()));
   child.on('close', (code) => {
+    // A reinstall stops the old process while starting the new one; the stale
+    // close event must not untrack or mark the replacement as stopped.
+    if (children.get(id) !== child) return;
     children.delete(id);
     const current = pluginById(id);
     if (current?.status === 'running' || current?.status === 'starting') {
@@ -159,7 +166,7 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
     const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 1500));
-      if (!children.has(id)) return; // exited, the close handler reported it
+      if (children.get(id) !== child) return; // exited or superseded by a restart
       if (!plugin.port) {
         setPluginStatus(id, 'running');
         return;
@@ -189,7 +196,7 @@ export function stopPlugin(id: string): Plugin | undefined {
   if (child) {
     child.kill('SIGTERM');
     setTimeout(() => {
-      if (children.has(id)) child.kill('SIGKILL');
+      if (children.get(id) === child) child.kill('SIGKILL');
     }, 4000);
     children.delete(id);
   }

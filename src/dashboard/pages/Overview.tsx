@@ -7,6 +7,7 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
   const [data, setData] = useState<any>(null);
   const [status, setStatus] = useState<any>(null);
   const [bootstrap, setBootstrap] = useState<{ key: string; active: boolean } | null>(null);
+  const [sched, setSched] = useState<any>(null);
 
   useEffect(() => {
     let alive = true;
@@ -14,6 +15,7 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
       api.get('/overview').then((d) => alive && setData(d)).catch(() => {});
       api.get('/setup/status').then((d) => alive && setStatus(d)).catch(() => {});
       api.get('/bootstrap-key').then((d) => alive && setBootstrap(d)).catch(() => {});
+      api.get('/scheduler').then((d) => alive && setSched(d)).catch(() => {});
     };
     load();
     const t = setInterval(load, 5000);
@@ -55,6 +57,18 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
           tone={counts.uncalibrated ? 'warn' : counts.emulated ? 'ok' : undefined}
         />
         <Stat label="connectors" value={counts.running_plugins ?? 0} hint={`${counts.upstreams ?? 0} upstreams`} />
+        <Stat
+          label="scheduler"
+          value={sched?.running ? 'running' : sched?.enabled ? 'on' : 'off'}
+          hint={
+            sched?.enabled
+              ? sched?.next_run
+                ? `next ${new Date(sched.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
+                : 'next run pending'
+              : 'background refresh off'
+          }
+          tone={sched?.running ? 'warn' : sched?.enabled ? 'ok' : undefined}
+        />
       </div>
 
       <div className="grid-side">

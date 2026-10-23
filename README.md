@@ -51,9 +51,13 @@ The catalog ships with these (all third-party, all unofficial):
 
 Connectors ship a fixed model list and fall behind the provider. Add the newer ids yourself: the setup wizard takes extra ids per upstream, and each upstream has an **add model** field in the panel. comb routes an id the connector never advertised; if the provider rejects it, normal failover applies.
 
-You are not limited to the catalog. **Connectors → add custom repo** takes a git URL plus install and run commands. You can also skip connectors entirely and point an upstream at any OpenAI-compatible URL, or at a CLI on this host (`cli-spawn` adapter, `$COMB_PROMPT` / `$COMB_MODEL` in the command).
+You are not limited to the catalog. **Connectors → add custom connector** (also reachable from Setup) takes either a git URL or an uploaded archive (`.zip`, `.tar.gz`, `.tgz`, `.tar`, `.rar`, `.7z`). comb stages it, extracts with zip-slip protection, unwraps a single top-level folder, then analyzes the tree: runtime and lockfile, install and start commands, listening port, kind, native vs emulated tools, and model ids found in the README and config. You review or edit every field before pressing install. Installing under an existing id replaces that connector's files and reinstalls it.
 
-Install commands run as your user with git, npm, python and go available. Only install repos you trust.
+`.zip` and `.tar`/`.tar.gz` are parsed by comb itself. `.rar` and `.7z` need a host extractor (`unrar`, `unar`, `7z` or `bsdtar`); without one the API returns the exact list of binaries to install. Uploads are capped at 200 MB.
+
+You can also skip connectors entirely and point an upstream at any OpenAI-compatible URL, or at a CLI on this host (`cli-spawn` adapter, `$COMB_PROMPT` / `$COMB_MODEL` in the command).
+
+Install commands run as your user with git, npm, python and go available. Only install sources you trust.
 
 ## Tool emulation
 
@@ -76,6 +80,8 @@ Scope and limits:
 - Emulation cannot give a text-only model the ability to see tool output it never received; it works because the client sends results back on the next turn, exactly like the OpenAI API.
 
 **Refresh** on an upstream runs the same pipeline in one step: it asks the connector for its live model list, seeds the preset and connector ids when the connector is down or returns nothing, keeps every existing row and manual id, then calibrates only the emulated models that are uncalibrated or failed. Pass `force` to re-probe everything. Nothing is deleted.
+
+The **background scheduler** runs that refresh for every active upstream on an interval (default 60 minutes, off until enabled in Settings). It re-discovers models, checks health, and calibrates only emulated models that are still uncalibrated; failures are retried after a six-hour backoff, and calibrated models are never re-probed. Passes are serial: a second pass, or a manual refresh already in flight, is skipped rather than stacked. Settings shows the last run summary, last and next run times, and a **run now** button. `GET/PATCH /api/scheduler` and `POST /api/scheduler/run` back it.
 
 ## Routing
 
@@ -123,7 +129,7 @@ Terms risk also applies to Antigravity OAuth and other subscription-backed conne
 ```bash
 npm run dev        # API + built dashboard on :3000 (rebuild the UI with npm run build)
 npm run typecheck
-npm test           # parser, router, failover and dashboard render tests
+npm test           # parser, router, failover, refresh, scheduler, archive, analyzer and dashboard tests
 node scripts/fake-connector.mjs   # fake web2api on :8811 for manual testing
 ```
 
