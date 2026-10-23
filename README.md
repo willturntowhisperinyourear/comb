@@ -2,6 +2,8 @@
 
 A local model router with replaceable connectors. Point any OpenAI client at it, and comb routes the request to a web session, a CLI, or an API, with native-looking tool calling on top of providers that only speak plain text.
 
+# WIP, expect bugs, and model response failures A LOT. Do not us this as-is in production-grade environments, rather use it as a base.
+
 ```
 client ──▶ comb (:3000/v1) ──▶ chain / model resolution
                                   │
