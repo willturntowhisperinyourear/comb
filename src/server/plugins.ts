@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, write
 import { join } from 'node:path';
 import { DATA_DIR, get, nowIso, PLUGIN_DIR, run, setting } from './db.ts';
 import { PROVIDER_PRESETS } from './catalog.ts';
-import type { Model, Plugin, ToolVariant } from '../shared/types.ts';
+import type { Model, Plugin, ToolVariant, Upstream } from '../shared/types.ts';
 import { probe } from './adapters.ts';
 import { modelById, upstreamById, type Candidate } from './router.ts';
 import { killProcessTree, runProcess, runShell, spawnShell } from './process.ts';
@@ -64,6 +64,22 @@ export const calibrationFor = (mode: string): 'uncalibrated' | null =>
 
 export function setPluginStatus(id: string, status: string, error: string | null = null) {
   run('update plugins set status = ?, last_error = ?, updated_at = ? where id = ?', status, error, nowIso(), id);
+  if (status === 'error' && setting('doctor_auto_enabled', '0') === '1') {
+    void import('./doctor.ts').then(({ scheduleDoctor }) => scheduleDoctor(id)).catch(() => {});
+  }
+}
+
+function modelHeaders(upstream?: Upstream): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (upstream?.api_key) headers.authorization = `Bearer ${upstream.api_key}`;
+  if (upstream?.auth_mode === 'cookie' && upstream.cookie) headers.cookie = upstream.cookie;
+  try {
+    const configured = JSON.parse(upstream?.headers ?? '{}');
+    if (configured && typeof configured === 'object' && !Array.isArray(configured)) {
+      for (const [key, value] of Object.entries(configured)) headers[key] = String(value);
+    }
+  } catch {}
+  return headers;
 }
 
 /**
@@ -119,7 +135,7 @@ export function installPlugin(id: string): Plugin | undefined {
   return pluginById(id);
 }
 
-export async function startPlugin(id: string): Promise<Plugin | undefined> {
+export async function startPlugin(id: string, readinessTimeoutMs = 45_000): Promise<Plugin | undefined> {
   const plugin = pluginById(id);
   if (!plugin) return undefined;
   if (plugin.status === 'installing') return plugin;
@@ -171,7 +187,8 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
   });
 
   void (async () => {
-    const deadline = Date.now() + 45_000;
+    const deadline = Date.now() + readinessTimeoutMs;
+    let healthError = 'no response from the connector';
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 1500));
       if (children.get(id) !== child) return; // exited or superseded by a restart
@@ -181,19 +198,27 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
       }
       try {
         const res = await fetch(`http://127.0.0.1:${plugin.port}${plugin.base_path || '/v1'}/models`, {
+          headers: modelHeaders(get<Upstream>("select * from upstreams where plugin_id = ? and status = 'active' order by created_at limit 1", id)),
           signal: AbortSignal.timeout(2500),
         });
-        if (res.status < 500) {
+        const body: any = await res.json().catch(() => null);
+        const models = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : null;
+        if (res.ok && models?.some((model: any) => typeof (model?.id ?? model?.name) === 'string')) {
+          if (children.get(id) !== child) return;
           setPluginStatus(id, 'running');
           log(id, `healthy on :${plugin.port}`);
           return;
         }
-      } catch {
-        // not up yet
+        healthError = `HTTP ${res.status}: ${body?.error?.message ?? body?.error ?? 'no usable model list returned'}`;
+      } catch (error) {
+        healthError = error instanceof Error ? error.message : String(error);
       }
     }
-    setPluginStatus(id, 'running');
-    log(id, 'no health response yet; left running');
+    if (children.get(id) !== child) return;
+    stopPlugin(id);
+    const message = `connector is not ready: ${healthError}. Check the connector log and authentication requirements.`;
+    setPluginStatus(id, 'error', message);
+    log(id, message);
   })();
 
   return pluginById(id);
@@ -223,16 +248,19 @@ export async function discoverModels(upstreamId: string): Promise<{ discovered: 
   const base = (up.base_url ?? '').replace(/\/+$/, '');
   if (!base) return { discovered: [], created: [], error: 'upstream has no base_url' };
 
-  const headers: Record<string, string> = {};
-  if (up.api_key) headers.authorization = `Bearer ${up.api_key}`;
-  if (up.cookie) headers.cookie = up.cookie;
+  const headers = modelHeaders(up);
 
   let list: any[] = [];
   try {
     const res = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) return { discovered: [], created: [], error: `${res.status} from ${base}/models` };
-    const json: any = await res.json();
-    list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
+    const json: any = await res.json().catch(() => null);
+    if (!res.ok || json?.error) {
+      return { discovered: [], created: [], error: `${res.status} from ${base}/models: ${json?.error?.message ?? json?.error ?? res.statusText}` };
+    }
+    if (!Array.isArray(json?.data) && !Array.isArray(json)) {
+      return { discovered: [], created: [], error: `invalid model list from ${base}/models` };
+    }
+    list = Array.isArray(json?.data) ? json.data : json;
   } catch (err: any) {
     return { discovered: [], created: [], error: `discovery failed: ${err?.message ?? err}` };
   }
@@ -380,6 +408,7 @@ export async function testModel(modelId: string, prompt: string) {
   if (!upstream) return { ok: false, error: 'upstream not found' };
   const started = Date.now();
   const result = await probe({ model, upstream }, [{ role: 'user', content: prompt }]);
+  if (!result.ok && upstream.plugin_id) void import('./doctor.ts').then(({ scheduleDoctor }) => scheduleDoctor(upstream.plugin_id)).catch(() => {});
   return {
     ok: result.ok,
     ms: Date.now() - started,

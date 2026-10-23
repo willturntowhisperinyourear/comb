@@ -3,9 +3,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { api } from './api.ts';
 import { proxy } from './proxy.ts';
-import { DATA_DIR, setting } from './db.ts';
+import { all, DATA_DIR, setting } from './db.ts';
 import { cleanStaging } from './connectors.ts';
 import { startScheduler } from './scheduler.ts';
+import { scheduleDoctor } from './doctor.ts';
 
 const app = express();
 app.disable('x-powered-by');
@@ -36,6 +37,7 @@ const host = process.env.HOST ?? '127.0.0.1';
 app.listen(port, host, () => {
   cleanStaging();
   startScheduler();
+  for (const plugin of all<{ id: string }>("select id from plugins where status = 'error'")) scheduleDoctor(plugin.id);
   const key = setting('bootstrap_api_key', '');
   console.log(`comb listening on http://${host}:${port}`);
   console.log(`data dir: ${DATA_DIR}`);

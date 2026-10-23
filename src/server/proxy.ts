@@ -13,6 +13,7 @@ import {
 } from './router.ts';
 import { callUpstream, type ChatPayload } from './adapters.ts';
 import type { Strategy } from '../shared/types.ts';
+import { scheduleDoctor } from './doctor.ts';
 
 export const proxy = Router();
 
@@ -124,6 +125,7 @@ export async function chatOnce(
       };
     }
     markFailure(candidate.model.id, result.error ?? `status ${result.status}`, result.retryAfterMs);
+    scheduleDoctor(candidate.upstream.plugin_id);
     recordUsage({
       keyId,
       model: payload.model,
@@ -330,6 +332,7 @@ proxy.post('/v1/chat/completions', async (req: Request, res: Response) => {
     }
 
     markFailure(candidate.model.id, result.error ?? `status ${result.status}`, result.retryAfterMs);
+    scheduleDoctor(candidate.upstream.plugin_id);
     recordUsage({
       keyId: auth.key.id,
       model: requested,

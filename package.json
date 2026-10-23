@@ -12,7 +12,8 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx src/server/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/server/*.test.ts src/dashboard/*.test.ts"
+    "test": "tsx --test src/server/*.test.ts src/dashboard/*.test.ts",
+    "test:connector": "node scripts/test-connector.mjs"
   },
   "dependencies": {
     "express": "^5.1.0"

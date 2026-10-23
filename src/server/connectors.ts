@@ -183,7 +183,7 @@ export async function downloadArchive(url: string): Promise<string> {
   return saveUploadedArchive(name, data);
 }
 
-function ensureUpstream(
+export function ensureUpstream(
   pluginId: string,
   name: string,
   kind: PluginKind,

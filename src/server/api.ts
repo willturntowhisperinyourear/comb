@@ -32,6 +32,7 @@ import { parseMultipart } from './upload.ts';
 import { isArchiveName } from './archive.ts';
 import { configureScheduler, runSchedulerTick, schedulerState } from './scheduler.ts';
 import type { AdapterKind, AuthMode, Strategy, ToolsMode } from '../shared/types.ts';
+import { configureDoctor, doctorBusy, doctorConfig, doctorReport, startDoctor, testDoctorModel } from './doctor.ts';
 
 export const api = Router();
 
@@ -234,7 +235,7 @@ api.post('/upstreams/:id/test', async (req, res) => {
 });
 
 api.post('/upstreams/:id/refresh', async (req, res) => {
-  const result = await refreshUpstream(req.params.id, { force: !!req.body?.force });
+  const result = await refreshUpstream(req.params.id, { force: !!req.body?.force, verify: !!req.body?.verify });
   if (result.error === 'upstream not found') return res.status(404).json(result);
   if (result.error) return res.status(409).json(result);
   res.json(result);
@@ -478,6 +479,7 @@ api.get('/plugins', (_req, res) => {
   res.json(
     all<any>('select * from plugins order by kind, name').map((p) => ({
       ...p,
+      doctor: doctorReport(p.id),
       running: runningPlugins().includes(p.id),
       // Custom sources can be replaced from the dashboard; catalog entries
       // are installed from their repo and must not be overwritten by upload.
@@ -506,6 +508,26 @@ api.post('/plugins/:id/stop', (req, res) => {
 
 api.get('/plugins/:id/log', (req, res) => {
   res.json({ log: pluginLog(req.params.id, 200) });
+});
+
+api.get('/plugins/:id/doctor', (req, res) => {
+  if (!pluginById(req.params.id)) return res.status(404).json({ error: 'connector not found' });
+  res.json({ report: doctorReport(req.params.id), busy: doctorBusy(req.params.id) });
+});
+
+api.post('/plugins/:id/doctor', (req, res) => {
+  try { res.status(202).json(startDoctor(req.params.id, { repair: req.body?.repair === true })); }
+  catch (error) { res.status(400).json({ error: String(error) }); }
+});
+
+api.get('/doctor/config', (_req, res) => res.json(doctorConfig()));
+api.patch('/doctor/config', (req, res) => {
+  try { res.json(configureDoctor(req.body ?? {})); }
+  catch (error) { res.status(400).json({ error: String(error) }); }
+});
+api.post('/doctor/model/test', async (_req, res) => {
+  try { res.json({ ok: true, advice: await testDoctorModel() }); }
+  catch (error) { res.status(502).json({ error: String(error) }); }
 });
 
 api.patch('/plugins/:id', (req, res) => {
@@ -670,7 +692,7 @@ const EDITABLE_SETTINGS = new Set([
 ]);
 
 api.get('/settings', (_req, res) => {
-  res.json(Object.fromEntries(all<any>('select key, value from settings').map((r) => [r.key, r.value])));
+  res.json(Object.fromEntries(all<any>('select key, value from settings').filter((r) => !r.key.startsWith('doctor_')).map((r) => [r.key, r.value])));
 });
 
 api.patch('/settings', (req, res) => {

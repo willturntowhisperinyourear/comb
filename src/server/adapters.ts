@@ -169,7 +169,9 @@ async function callHttp(
 
   if (opts.stream && res.headers.get('content-type')?.includes('event-stream')) {
     const acc = { content: '', finish: 'stop', tokensOut: 0, calls: new Map<number, ToolCall>() };
+    let error: string | null = null;
     await readSse(res, (event) => {
+      if (event?.error) error = errorMessage(event.error);
       const choice = event?.choices?.[0];
       const delta = choice?.delta;
       if (choice?.finish_reason) acc.finish = choice.finish_reason;
@@ -190,7 +192,11 @@ async function callHttp(
         acc.calls.set(index, cur);
       }
     });
+    if (error) return { ...fail(502, error), tokensIn: tokensInGuess };
     const toolCalls = [...acc.calls.values()].filter((x) => x.function.name);
+    if (!acc.content.trim() && !toolCalls.length) {
+      return { ...fail(502, 'upstream stream returned no assistant content or tool calls'), tokensIn: tokensInGuess };
+    }
     return {
       ok: true,
       status: 200,
@@ -203,10 +209,16 @@ async function callHttp(
   }
 
   const json: any = await res.json().catch(() => null);
-  if (!json) return { ...fail(res.status, 'upstream returned non-JSON'), tokensIn: tokensInGuess };
+  if (!json) return { ...fail(502, 'upstream returned non-JSON'), tokensIn: tokensInGuess };
+  if (json.error) return { ...fail(502, errorMessage(json.error)), tokensIn: tokensInGuess };
 
   const message = json.choices?.[0]?.message ?? json.message ?? {};
-  const content = typeof message.content === 'string' ? message.content : textFromParts(message.content);
+  const content = typeof message.content === 'string'
+    ? message.content
+    : typeof message.refusal === 'string' ? message.refusal : textFromParts(message.content);
+  if (!content.trim() && !message.tool_calls?.length) {
+    return { ...fail(502, 'upstream returned no assistant content or tool calls'), tokensIn: tokensInGuess };
+  }
   const finish = json.choices?.[0]?.finish_reason ?? 'stop';
 
   if (emulating) {
@@ -255,6 +267,11 @@ async function callHttp(
 function textFromParts(parts: unknown): string {
   if (!Array.isArray(parts)) return '';
   return parts.map((p: any) => p?.text ?? '').join('');
+}
+
+function errorMessage(error: any): string {
+  const message = typeof error === 'string' ? error : error?.message ?? JSON.stringify(error);
+  return `${error?.code ? `${error.code}: ` : ''}${message}`.slice(0, 1000);
 }
 
 async function readSse(res: Response, onEvent: (event: any) => void) {

@@ -11,9 +11,15 @@ const db = await import('./db.ts');
 const refresh = await import('./refresh.ts');
 const modelsApi = await import('./models.ts');
 const plugins = await import('./plugins.ts');
+const requests: any[] = [];
 
 const server: Server = createServer((req, res) => {
   if (req.method === 'GET' && req.url?.endsWith('/models')) {
+    if (req.url.includes('/no-models/')) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Failed to fetch models' } }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }));
     return;
@@ -22,6 +28,17 @@ const server: Server = createServer((req, res) => {
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     const json = JSON.parse(body || '{}');
+    requests.push(json);
+    if (req.url?.includes('/blocked/')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'FAIL_SYS_USER_VALIDATE', message: 'provider rejected guest request' } }));
+      return;
+    }
+    if (req.url?.includes('/empty/')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '' } }] }));
+      return;
+    }
     const system = String(json.messages?.[0]?.content ?? '');
     const last = String(json.messages?.at(-1)?.content ?? '');
     let content = 'plain answer';
@@ -147,4 +164,45 @@ test('whitespace ids are rejected and existing rows are preserved', async () => 
   const row = db.get<any>('select * from models where id = ?', 'manual-web/model-a');
   assert.equal(row.calibration_status, 'uncalibrated');
   assert.equal(modelsApi.addModels(id, ['model-a']).existing[0], 'manual-web/model-a');
+});
+
+test('setup verifies an actual assistant response before calibration', async () => {
+  const id = upstream({ name: 'Verified Web' });
+  const result = await refresh.refreshUpstream(id, { verify: true });
+  assert.equal(result.verification?.ok, true);
+  assert.equal(result.verification?.reply, 'plain answer');
+  assert.equal(result.calibrated, 2);
+  assert.equal(result.healthy, true);
+});
+
+test('a model list does not count as a working provider when chat returns an HTTP 200 error', async () => {
+  const id = upstream({ name: 'Blocked Web', base_url: `${base}/blocked` });
+  const before = requests.length;
+  const result = await refresh.refreshUpstream(id, { verify: true });
+  assert.equal(result.discovered.length, 2);
+  assert.equal(result.verification?.ok, false);
+  assert.match(result.verification?.error ?? '', /FAIL_SYS_USER_VALIDATE/);
+  assert.equal(result.healthy, false);
+  assert.equal(result.calibrated, 0);
+  assert.equal(requests.length - before, 1, 'does not spend repeated calibration probes on a blocked provider');
+  assert.ok(db.all<any>('select * from models where upstream_id = ?', id).every((row) => row.calibration_status === 'uncalibrated'));
+});
+
+test('empty assistant responses fail verification', async () => {
+  const id = upstream({ name: 'Empty Web', base_url: `${base}/empty` });
+  const result = await refresh.refreshUpstream(id, { verify: true });
+  assert.equal(result.verification?.ok, false);
+  assert.equal(result.calibrated, 0);
+  assert.equal(result.healthy, false);
+});
+
+test('failed discovery preserves the upstream diagnostic and does not invent Qwen models', async () => {
+  const id = upstream({ name: 'Qwen Web', preset: 'qwen-web', base_url: `${base}/no-models` });
+  const before = requests.length;
+  const result = await refresh.refreshUpstream(id, { verify: true });
+  assert.equal(result.discovered.length, 0);
+  assert.equal(result.created.length, 0);
+  assert.equal(result.verification?.ok, false);
+  assert.equal(requests.length, before);
+  assert.ok(result.warnings.some((warning) => warning.includes('Failed to fetch models')));
 });

@@ -1,7 +1,7 @@
 import { all } from './db.ts';
 import { PROVIDER_PRESETS } from './catalog.ts';
 import { addModels } from './models.ts';
-import { defaultToolsMode, discoverModels, pluginById, recalibrateModel, runningPlugins } from './plugins.ts';
+import { defaultToolsMode, discoverModels, pluginById, recalibrateModel, runningPlugins, testModel } from './plugins.ts';
 import { upstreamById } from './router.ts';
 
 // One refresh per upstream at a time, shared by the API, the setup wizard and
@@ -15,6 +15,8 @@ export interface RefreshOptions {
   retryFailedAfterMs?: number;
   /** false keeps models uncalibrated, for installs that should not spend probes. */
   calibrate?: boolean;
+  /** Require a real text response before spending tool calibration probes. */
+  verify?: boolean;
 }
 
 export interface RefreshResult {
@@ -27,6 +29,7 @@ export interface RefreshResult {
   warnings: string[];
   healthy: boolean;
   connector_running: boolean;
+  verification: { ok: boolean; model?: string; reply?: string; error?: string } | null;
   error?: string;
 }
 
@@ -40,6 +43,7 @@ const empty = (): RefreshResult => ({
   warnings: [],
   healthy: false,
   connector_running: false,
+  verification: null,
 });
 
 /**
@@ -94,8 +98,23 @@ export async function refreshUpstream(upstreamId: string, opts: RefreshOptions =
     const rows = all<any>('select * from models where upstream_id = ? order by id', up.id);
     // Probing a connector that is not running only produces "failed" noise, so
     // refresh leaves those models uncalibrated until it is back up.
-    const canProbe = !plugin || connectorRunning;
-    if (!canProbe) {
+    let canProbe = !plugin || connectorRunning;
+    let verification: RefreshResult['verification'] = null;
+    if (opts.verify) {
+      const candidate = rows.find((m) => m.enabled && (live.discovered.includes(m.upstream_model) || up.adapter === 'cli-spawn'));
+      if (!canProbe || !candidate) {
+        verification = { ok: false, error: 'no live model is available for a response test; discovery must succeed first' };
+      } else {
+        const result = await testModel(candidate.id, 'Reply with the single word OK.');
+        verification = { ...result, model: candidate.id };
+      }
+      if (!verification.ok) {
+        canProbe = false;
+        warnings.push(`response test failed: ${verification.error ?? 'no assistant response'}; calibration skipped`);
+        if (up.plugin_id) void import('./doctor.ts').then(({ scheduleDoctor }) => scheduleDoctor(up.plugin_id)).catch(() => {});
+      }
+    }
+    if (plugin && !connectorRunning) {
       warnings.push('calibration skipped while the connector is down; refresh again after starting it');
     }
 
@@ -122,6 +141,7 @@ export async function refreshUpstream(upstreamId: string, opts: RefreshOptions =
     }
 
     const created = [...new Set([...live.created, ...seeded.created])];
+    if (up.plugin_id && (live.error || failed)) void import('./doctor.ts').then(({ scheduleDoctor }) => scheduleDoctor(up.plugin_id)).catch(() => {});
     return {
       discovered: live.discovered,
       created,
@@ -130,8 +150,9 @@ export async function refreshUpstream(upstreamId: string, opts: RefreshOptions =
       failed,
       skipped: rows.length - candidates.length,
       warnings,
-      healthy: reachable || (!plugin && up.adapter === 'cli-spawn'),
+      healthy: verification ? verification.ok : reachable || (!plugin && up.adapter === 'cli-spawn'),
       connector_running: plugin ? connectorRunning : true,
+      verification,
     };
   } finally {
     busy.delete(up.id);

@@ -228,6 +228,19 @@ function seed() {
     PLUGIN_CATALOG.find((p) => p.id === 'deepseek-web')!.install_cmd,
     'python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt  && ./.venv/bin/python app.py --port 8083',
   );
+  const qwen = PLUGIN_CATALOG.find((p) => p.id === 'qwen-web')!;
+  run(
+    "update plugins set description = ? where id = 'qwen-web' and description = ?",
+    qwen.description,
+    'chat.qwen.ai guest or token session. No native function calling; comb emulates tools. Guest quota regenerates with a fresh cookie jar.',
+  );
+  run(
+    "update plugins set auth_hint = ? where id = 'qwen-web' and auth_hint = ?",
+    qwen.auth_hint,
+    'Optional Qwen access_token from chat.qwen.ai local storage. Guest mode mints its own Bayer/baxia tokens.',
+  );
+  run("update upstreams set reset_mode = 'none' where preset = 'qwen-web' and plugin_id = 'qwen-web' and reset_mode = 'cookie_reset'");
+  run("update upstreams set auth_mode = 'none' where preset = 'qwen-web' and plugin_id = 'qwen-web' and auth_mode = 'cookie'");
 }
 seed();
 

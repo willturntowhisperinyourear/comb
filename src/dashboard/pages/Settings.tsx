@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.ts';
 import { Badge, Button, Field, Panel } from '../ui.tsx';
+import DoctorSettings from '../DoctorSettings.tsx';
 
 const STRATEGIES = [
   'priority',
@@ -260,6 +261,8 @@ export default function SettingsPage() {
           </div>
         ) : null}
       </Panel>
+
+      <DoctorSettings />
 
       <Panel title="runtime">
         <table>

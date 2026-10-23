@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
+import { createServer } from 'node:http';
 
 process.env.COMB_DATA = mkdtempSync(join(tmpdir(), 'comb-plugins-'));
 const db = await import('./db.ts');
@@ -101,6 +102,45 @@ test('filesystem failures during install become connector errors', () => {
   const result = plugins.installPlugin('nonempty');
   assert.equal(result?.status, 'error');
   assert.match(result?.last_error ?? '', /not empty/);
+});
+
+test('a live process with failed model discovery never becomes running', async () => {
+  const unhealthy = createServer((_req, res) => {
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Failed to fetch models' } }));
+  });
+  await new Promise<void>((resolve) => unhealthy.listen(0, '127.0.0.1', resolve));
+  plugin('unhealthy', { installed: true, start: `${node} -e 'setInterval(() => {}, 1000)'` });
+  db.run('update plugins set port = ? where id = ?', (unhealthy.address() as any).port, 'unhealthy');
+  try {
+    await plugins.startPlugin('unhealthy', 100);
+    const result = await waitFor('unhealthy', ['error', 'running']);
+    assert.equal(result.status, 'error');
+    assert.match(result.last_error!, /HTTP 500: Failed to fetch models/);
+    assert.equal(plugins.runningPlugins().includes('unhealthy'), false);
+    assert.equal((await fetch(`${base}/plugins`)).status, 200);
+  } finally {
+    plugins.stopPlugin('unhealthy');
+    unhealthy.close();
+  }
+});
+
+test('readiness and discovery use configured upstream credentials and headers', async () => {
+  const secured = createServer((req, res) => {
+    const ok = req.headers.authorization === 'Bearer readiness-key' && req.headers['x-provider'] === 'ready';
+    res.writeHead(ok ? 200 : 401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(ok ? { data: [{ id: 'secured-model' }] } : { error: { message: 'authentication required' } }));
+  });
+  await new Promise<void>((resolve) => secured.listen(0, '127.0.0.1', resolve));
+  plugin('secured', { installed: true, start: `${node} -e 'setInterval(() => {}, 1000)'` });
+  const port = (secured.address() as any).port;
+  db.run('update plugins set port = ? where id = ?', port, 'secured');
+  db.run(`insert into upstreams(id,name,kind,plugin_id,base_url,api_key,headers,created_at) values('secured-up','Secured','api','secured',?,?,?,?)`, `http://127.0.0.1:${port}/v1`, 'readiness-key', '{"x-provider":"ready"}', db.nowIso());
+  try {
+    await plugins.startPlugin('secured', 100);
+    assert.equal((await waitFor('secured', ['running', 'error'])).status, 'running');
+    assert.deepEqual((await plugins.discoverModels('secured-up')).discovered, ['secured-model']);
+  } finally { plugins.stopPlugin('secured'); secured.close(); }
 });
 
 test('rerunning setup returns an existing upstream and adds extra model ids', async () => {

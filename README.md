@@ -33,7 +33,7 @@ The catalog ships with these (all third-party, all unofficial):
 | connector | kind | repo | auth |
 |---|---|---|---|
 | Gemini Web | web2api | [Sophomoresty/gemini-web2api](https://github.com/Sophomoresty/gemini-web2api) | `__Secure-1PSID` cookie, or anonymous flash |
-| Qwen Web | web2api | [smanx/qwen2api](https://github.com/smanx/qwen2api) | guest session or `access_token` |
+| Qwen Web | web2api | [smanx/qwen2api](https://github.com/smanx/qwen2api) | Chrome/Chromium guest session; provider validation can block it |
 | DeepSeek Web | web2api | [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API) | browser login cached on disk |
 | Arena.AI | web2api | [CloudWaddie/LMArenaBridge](https://github.com/CloudWaddie/LMArenaBridge) | arena session token |
 | Grok Web | web2api | [anojndr/grok.com-to-openai](https://github.com/anojndr/grok.com-to-openai) | `sso` cookies |
@@ -51,7 +51,27 @@ The catalog ships with these (all third-party, all unofficial):
 | gpt-load | api2api | [tbphp/gpt-load](https://github.com/tbphp/gpt-load) | provider keys / OAuth pools |
 | LLM API Key Proxy | api2api | [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-API-Key-Proxy) | numbered env keys |
 
-Connectors ship a fixed model list and fall behind the provider. Add the newer ids yourself: the setup wizard takes extra ids per upstream, and each upstream has an **add model** field in the panel. comb routes an id the connector never advertised; if the provider rejects it, normal failover applies.
+Most connectors ship a fixed model list and fall behind the provider. Add the newer ids yourself: the setup wizard takes extra ids per upstream, and each upstream has an **add model** field in the panel. comb routes an id the connector never advertised; if the provider rejects it, normal failover applies. Qwen Web uses live discovery instead of speculative catalog ids. Setup verifies a real assistant response before calibrating tools and reports failures explicitly.
+
+## Connector doctor
+
+**Connectors → diagnose** checks installation, upstream configuration, live discovery, a normal chat response, and a streaming response. **Diagnose and repair** applies supported local repairs and repeats the response tests. Reports persist across restarts. A repaired status requires successful discovery and both chat tests.
+
+Supported repairs synchronize a stale localhost URL with the connector's configured port, create a missing upstream, restore missing commands from a matching catalog entry, rerun the configured dependency installation, and restart an unreachable installed connector. Doctor recognizes provider validation, authentication and missing-model errors as conditions requiring attention, so it does not keep reinstalling a connector that the provider rejects.
+
+In **Settings → connector doctor**, enable automatic diagnosis and repair to run after startup, routing, discovery or verification failures. Automatic passes have a 30-minute per-connector backoff and never overlap a pass already in progress. Built-in checks work without a model.
+
+For deeper diagnosis, configure an independent, working OpenAI-compatible model base URL and model id in the same panel. Add its API key if needed, then use **save and test model**. The model receives a bounded, redacted diagnostic report and log excerpt; stored keys, cookies and upstream header values are removed. Its explanation appears alongside the checks. Built-in repair actions execute the connector's existing configured commands; model-generated commands are not executed.
+
+`GET/PATCH /api/doctor/config`, `POST /api/doctor/model/test`, and `GET/POST /api/plugins/:id/doctor` back this feature. A doctor POST returns 202 immediately; poll GET for the completed report. Pass `{"repair":true}` to apply supported repairs.
+
+To test an actual connector independently of the dashboard:
+
+```bash
+npm run test:connector -- --base-url http://127.0.0.1:8082/v1 --model <live-model-id>
+```
+
+The command checks discovery and sends real non-streaming and streaming prompts with a unique response marker. It exits nonzero on transport, provider, protocol or empty-response failures. Set `COMB_TEST_API_KEY` when the endpoint requires a bearer key, including when testing through comb's `/v1` endpoint. See [the Qwen live test findings](docs/qwen-connector-review.md) for the failure reproduced during this repair.
 
 You are not limited to the catalog. **Connectors → add custom connector** (also reachable from Setup) takes either a git URL or an uploaded archive (`.zip`, `.tar.gz`, `.tgz`, `.tar`, `.rar`, `.7z`). comb stages it, extracts with zip-slip protection, unwraps a single top-level folder, then analyzes the tree: runtime and lockfile, install and start commands, listening port, kind, native vs emulated tools, and model ids found in the README and config. You review or edit every field before pressing install. Installing under an existing id replaces that connector's files and reinstalls it.
 
@@ -116,7 +136,7 @@ The `/api/*` routes back the dashboard. They are unauthenticated by design for a
 
 ## Free web tiers and session reset
 
-Some web providers hand a **guest** session its own quota. Qwen chat is the common example: a browser session that has not logged in gets a slice of free access, and a fresh cookie jar looks like a new guest. comb's `cookie_reset` upstream mode drops the stored cookie and clears cooldowns for that upstream's models, so the connector mints a new guest session on the next request.
+Some web providers hand a **guest** session its own quota. comb's `cookie_reset` upstream mode drops comb's stored cookie and clears cooldowns for that upstream's models. Session recovery requires a connector that actually consumes the forwarded cookie. The catalog's Qwen connector manages its own guest session and ignores incoming Qwen access tokens/cookies, so cookie reset is disabled for it. Its `API_TOKENS` setting authenticates callers of the local proxy; it is not a Qwen login credential.
 
 What this is not: a way to remove real account limits. Logged-in accounts, per-IP fair use and provider-side device fingerprinting all survive a cookie wipe, and providers change or ban this kind of use whenever they want. Treat it as session recovery, keep your own requests modest, and expect the connector to break when the provider ships a change.
 

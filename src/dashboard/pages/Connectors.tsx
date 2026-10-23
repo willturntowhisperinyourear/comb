@@ -12,6 +12,13 @@ export default function ConnectorsPage() {
   const [editId, setEditId] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [doctorOpen, setDoctorOpen] = useState<string | null>(null);
+  const selectedDoctor = plugins.find((plugin) => plugin.id === doctorOpen);
+  const report = selectedDoctor?.doctor;
+
+  useEffect(() => {
+    if (report) document.getElementById('connector-doctor-report')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, [doctorOpen, report?.at]);
 
   const load = () => api.get('/plugins').then(setPlugins).catch((e) => setError(e.message));
   useEffect(() => {
@@ -28,6 +35,16 @@ export default function ConnectorsPage() {
     } catch (e: any) {
       setError(e.message);
     }
+  }
+
+  async function diagnose(id: string, repair: boolean) {
+    setError('');
+    setDoctorOpen(id);
+    try {
+      const doctor = await api.post(`/plugins/${id}/doctor`, { repair });
+      setPlugins((rows) => rows.map((plugin) => plugin.id === id ? { ...plugin, doctor } : plugin));
+      load();
+    } catch (e: any) { setError(e.message); }
   }
 
   async function showLog(id: string) {
@@ -182,6 +199,9 @@ export default function ConnectorsPage() {
                       <Button variant="ghost" onClick={() => showLog(p.id)}>
                         {open === p.id ? 'hide' : 'log'}
                       </Button>
+                      <Button onClick={() => diagnose(p.id, false)} disabled={p.doctor?.status === 'running' || p.status === 'installing' || p.status === 'starting'}>diagnose</Button>
+                      <Button onClick={() => diagnose(p.id, true)} disabled={p.doctor?.status === 'running' || p.status === 'installing' || p.status === 'starting'}>diagnose and repair</Button>
+                      {p.doctor && <Button variant="ghost" onClick={() => setDoctorOpen(p.id)}>doctor report</Button>}
                       {p.custom && (
                         <Button
                           variant="ghost"
@@ -204,6 +224,25 @@ export default function ConnectorsPage() {
           {!plugins.length && <Empty>No connectors in the catalog.</Empty>}
         </div>
       </Panel>
+      {report && <div id="connector-doctor-report">
+        <Panel title={`${selectedDoctor.name} doctor`} actions={<Badge tone={report.status === 'healthy' || report.status === 'repaired' ? 'ok' : report.status === 'running' ? 'warn' : 'bad'}>{report.status.replaceAll('_', ' ')}</Badge>}>
+          <div role="status" aria-live="polite">
+            <p>{report.diagnosis}</p>
+            {report.error && <div className="note bad">{report.error}</div>}
+            {report.checks.map((check: any) => <p key={check.name}><b>{check.ok ? 'PASS' : 'FAIL'} {check.name}:</b> {check.detail}</p>)}
+            {report.available_repairs.length > 0 && <p>Available repairs: {report.available_repairs.join(', ')}</p>}
+            {report.repairs.map((action: any) => <p key={action.action}><b>{action.ok ? 'APPLIED' : 'FAILED'} {action.action}:</b> {action.detail}</p>)}
+            {report.model_advice && <><p><b>Model diagnosis:</b> {report.model_advice.summary}</p><ul>{report.model_advice.next_steps.map((step: string, i: number) => <li key={i}>{step}</li>)}</ul></>}
+            {report.model_error && <p>Doctor model unavailable: {report.model_error}. Built-in checks still ran.</p>}
+            {report.finished_at && <div className="tiny">Last checked: {new Date(report.finished_at).toLocaleString()}</div>}
+          </div>
+          <div className="inline" style={{ marginTop: 12 }}>
+            <Button onClick={() => diagnose(selectedDoctor.id, false)} disabled={report.status === 'running'}>refresh diagnosis</Button>
+            <Button variant="primary" onClick={() => diagnose(selectedDoctor.id, true)} disabled={report.status === 'running' || !report.available_repairs.length}>apply repairs and retest</Button>
+            <Button variant="ghost" onClick={() => setDoctorOpen(null)}>close doctor report</Button>
+          </div>
+        </Panel>
+      </div>}
     </>
   );
 }

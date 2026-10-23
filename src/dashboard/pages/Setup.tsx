@@ -74,6 +74,7 @@ export default function SetupPage({ done }: { done: () => void }) {
     setLines([]);
     add(`install queue: ${[...picked].join(', ') || 'none'}`);
     add(`upstreams to create: ${[...pickedPresets].join(', ') || 'none'}`);
+    let hadFailure = false;
     try {
       const extraModels = Object.fromEntries(
         Object.entries(extras).map(([id, value]) => [
@@ -96,6 +97,7 @@ export default function SetupPage({ done }: { done: () => void }) {
         add(`waiting for ${p.id} to install…`);
         const done = await waitForPlugin(p.id, ['installed', 'error']);
         if (!done || done.status === 'error') {
+          hadFailure = true;
           unavailable.add(p.id);
           add(done ? `${p.id}: ${done.last_error}` : `${p.id}: install still running; check Connectors later`, 'err');
         } else add(`${p.id}: installed`, 'ok');
@@ -113,17 +115,25 @@ export default function SetupPage({ done }: { done: () => void }) {
           await api.post(`/plugins/${up.plugin_id}/start`).catch((e) => add(`start failed: ${e.message}`, 'err'));
           const started = await waitForPlugin(up.plugin_id, ['running', 'error', 'stopped'], 60);
           if (!started || started.status !== 'running') {
-            add(`${up.plugin_id}: not running (${started?.last_error ?? 'timeout'}) — seeding model ids anyway`, 'err');
+            hadFailure = true;
+            add(`${up.plugin_id}: not ready (${started?.last_error ?? 'timeout'})`, 'err');
           } else {
             add(`${up.plugin_id}: running`, 'ok');
           }
         }
         const refresh = await api
-          .post(`/upstreams/${up.id}/refresh`, {})
+          .post(`/upstreams/${up.id}/refresh`, { verify: true })
           .catch((e) => ({ error: e.message, warnings: [e.message] }));
         if (refresh.error) {
+          hadFailure = true;
           add(`refresh ${up.name}: ${refresh.error}`, 'err');
           continue;
+        }
+        if (!refresh.verification?.ok) {
+          hadFailure = true;
+          add(`${up.name}: no model response verified (${refresh.verification?.error ?? 'response test did not pass'})`, 'err');
+        } else {
+          add(`${up.name}: verified response from ${refresh.verification.model}: ${refresh.verification.reply}`, 'ok');
         }
         add(
           `${up.name}: ${refresh.discovered.length} discovered · ${refresh.created.length} new · ${refresh.calibrated} calibrated · ${refresh.failed} failed`,
@@ -131,7 +141,12 @@ export default function SetupPage({ done }: { done: () => void }) {
         );
         for (const warning of refresh.warnings ?? []) add(`  ${warning}`, 'err');
       }
-      add('setup finished. Review Models and Routing, then send a request from the Playground.', 'ok');
+      add(
+        hadFailure
+          ? 'setup completed with failures. See the errors above; affected connectors are not ready for chat.'
+          : 'setup verified model responses. Review Models and Routing, then send a request from the Playground.',
+        hadFailure ? 'err' : 'ok',
+      );
     } catch (err: any) {
       add(`setup failed: ${err.message}`, 'err');
     } finally {
