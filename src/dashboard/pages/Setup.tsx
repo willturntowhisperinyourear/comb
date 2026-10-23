@@ -89,20 +89,26 @@ export default function SetupPage({ done }: { done: () => void }) {
         create: [...pickedPresets],
         models: extraModels,
       });
-      add(`queued ${res.installed.length} install(s), created ${res.upstreams.length} upstream(s)`, 'ok');
+      add(`queued ${res.installed.length} install(s), prepared ${res.upstreams.length} upstream(s)`, 'ok');
 
+      const unavailable = new Set<string>();
       for (const p of res.installed) {
         add(`waiting for ${p.id} to install…`);
         const done = await waitForPlugin(p.id, ['installed', 'error']);
-        if (!done) add(`${p.id}: install still running; check Connectors later`, 'err');
-        else if (done.status === 'error') add(`${p.id}: ${done.last_error}`, 'err');
-        else add(`${p.id}: installed`, 'ok');
+        if (!done || done.status === 'error') {
+          unavailable.add(p.id);
+          add(done ? `${p.id}: ${done.last_error}` : `${p.id}: install still running; check Connectors later`, 'err');
+        } else add(`${p.id}: installed`, 'ok');
       }
 
       const created = new Set<string>(res.upstreams.map((u: any) => u.id));
       const upstreams = await api.get<any[]>('/upstreams');
       for (const up of upstreams.filter((u) => created.has(u.id))) {
         if (up.plugin_id) {
+          if (unavailable.has(up.plugin_id)) {
+            add(`${up.name}: skipped start and refresh because installation did not complete`, 'err');
+            continue;
+          }
           add(`starting connector for ${up.name}…`);
           await api.post(`/plugins/${up.plugin_id}/start`).catch((e) => add(`start failed: ${e.message}`, 'err'));
           const started = await waitForPlugin(up.plugin_id, ['running', 'error', 'stopped'], 60);

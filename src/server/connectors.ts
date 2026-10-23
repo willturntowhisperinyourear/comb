@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -20,6 +19,7 @@ import { appendPluginLog, pluginById, setPluginStatus, startPlugin, stopPlugin }
 import { refreshUpstream } from './refresh.ts';
 import { slugify } from './text.ts';
 import type { PluginKind } from '../shared/types.ts';
+import { runProcess, runShell } from './process.ts';
 
 // Custom connectors: a repo or archive becomes data/plugins/<id>, gets an
 // analyzed starting configuration, and is installed in the background.
@@ -92,34 +92,6 @@ export function cleanStaging(maxAgeMs = 24 * 3600_000) {
   }
 }
 
-function runProcess(
-  file: string,
-  args: string[],
-  cwd: string,
-  timeoutMs: number,
-): Promise<{ code: number; output: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(file, args, { cwd });
-    let output = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (b) => (output += b.toString()));
-    child.stderr.on('data', (b) => (output += b.toString()));
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      resolve({ code: 1, output: String(e) });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 1, output });
-    });
-  });
-}
-
-/** Install commands are shell by design; `exec` is only used for those. */
-function exec(cmd: string, cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
-  return runProcess('/bin/bash', ['-lc', cmd], cwd, timeoutMs);
-}
-
 export async function prepareGit(url: string): Promise<PreparedConnector> {
   const clean = url.trim();
   if (!clean) throw new Error('git url is required');
@@ -129,7 +101,7 @@ export async function prepareGit(url: string): Promise<PreparedConnector> {
   mkdirSync(dir, { recursive: true });
 
   // Args, not a shell string: a url must never be able to run a command.
-  const clone = await runProcess('git', ['clone', '--depth', '1', clean, 'src'], dir, 240_000);
+  const clone = await runProcess('git', ['clone', '--depth', '1', '--', clean, 'src'], { cwd: dir, timeoutMs: 240_000 });
   if (clone.code !== 0 || !existsSync(src)) {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`git clone failed: ${clone.output.slice(-400) || 'unknown error'}`);
@@ -361,7 +333,7 @@ export function finalizeCustomConnector(input: CustomConnectorInput): InstallRes
       setPluginStatus(id, 'installing');
       if (installCmd) {
         appendPluginLog(id, `install: ${installCmd}`);
-        const res = await exec(installCmd, dir, 20 * 60_000);
+        const res = await runShell(installCmd, { cwd: dir, timeoutMs: 20 * 60_000 });
         appendPluginLog(id, res.output.slice(-4000));
         if (res.code !== 0) {
           setPluginStatus(id, 'error', `install command failed: ${res.output.slice(-400)}`);

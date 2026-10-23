@@ -137,4 +137,6 @@ Layout: `src/server` (Express, SQLite via `node:sqlite`, router, adapters, plugi
 
 ## Not built yet
 
-Embeddings and the Responses API, multi-user auth, per-model token accounting from real usage data (connectors often omit it, so comb estimates), and proper token-by-token streaming for emulated tool providers. Connector installs assume a Debian-ish host with git, node, python3 and optionally go.
+Embeddings and the Responses API, multi-user auth, per-model token accounting from real usage data (connectors often omit it, so comb estimates), and proper token-by-token streaming for emulated tool providers.
+
+Connector commands use Bash. On Linux/macOS, comb uses `/bin/bash`. On Windows, install Git for Windows; comb finds its Bash automatically, including installations on PATH. Set `COMB_SHELL` to the full Bash executable path for a nonstandard installation. Windows commands use `python` and `.venv/Scripts/` for the catalog's Python environments; install Python on PATH. Node/npm and Go are needed by their respective connectors. Third-party repos may have additional platform requirements. Install and start failures appear in Connectors with their process output, and a failed connector does not stop the API or the rest of the setup queue.

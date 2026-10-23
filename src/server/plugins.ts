@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR, get, nowIso, PLUGIN_DIR, run, setting } from './db.ts';
@@ -6,6 +6,7 @@ import { PROVIDER_PRESETS } from './catalog.ts';
 import type { Model, Plugin, ToolVariant } from '../shared/types.ts';
 import { probe } from './adapters.ts';
 import { modelById, upstreamById, type Candidate } from './router.ts';
+import { killProcessTree, runProcess, runShell, spawnShell } from './process.ts';
 
 const children = new Map<string, ChildProcess>();
 
@@ -65,22 +66,6 @@ export function setPluginStatus(id: string, status: string, error: string | null
   run('update plugins set status = ?, last_error = ?, updated_at = ? where id = ?', status, error, nowIso(), id);
 }
 
-function runShell(cmd: string, cwd: string, env: NodeJS.ProcessEnv = {}, onLine?: (line: string) => void) {
-  return new Promise<{ code: number; output: string }>((resolve) => {
-    const child = spawn('/bin/bash', ['-lc', cmd], { cwd, env: { ...process.env, ...env } });
-    let output = '';
-    const push = (b: Buffer) => {
-      const text = b.toString();
-      output += text;
-      onLine?.(text);
-    };
-    child.stdout.on('data', push);
-    child.stderr.on('data', push);
-    child.on('error', (e) => resolve({ code: 1, output: String(e) }));
-    child.on('close', (code) => resolve({ code: code ?? 1, output }));
-  });
-}
-
 /**
  * Clone and run the connector's install command in the background. Returns
  * immediately: installs pull packages and take minutes, so the API reports
@@ -91,37 +76,44 @@ export function installPlugin(id: string): Plugin | undefined {
   if (!plugin) return undefined;
   if (plugin.status === 'installing') return plugin;
 
-  const dir = plugin.dir || join(PLUGIN_DIR, id);
-  mkdirSync(dir, { recursive: true });
-  if (!existsSync(join(dir, '.git')) && readdirSync(dir).length) {
-    setPluginStatus(id, 'error', `${dir} is not empty and is not a git checkout`);
-    return pluginById(id);
-  }
-  writeFileSync(logPath(id), '');
   setPluginStatus(id, 'installing');
-  log(id, `install start: ${plugin.repo} -> ${dir}`);
 
   void (async () => {
-    const clone = existsSync(join(dir, '.git'))
-      ? await runShell('git pull --ff-only', dir, {}, (t) => log(id, t.trimEnd()))
-      : await runShell(`git clone --depth 1 ${plugin.repo} .`, dir, {}, (t) => log(id, t.trimEnd()));
-    if (clone.code !== 0) {
-      log(id, `clone failed (${clone.code})`);
-      setPluginStatus(id, 'error', `git clone failed: ${clone.output.slice(-400)}`);
-      return;
-    }
-    if (plugin.install_cmd.trim()) {
-      log(id, `install: ${plugin.install_cmd}`);
-      const inst = await runShell(plugin.install_cmd, dir, {}, (t) => log(id, t.trimEnd()));
-      if (inst.code !== 0) {
-        log(id, `install command failed (${inst.code})`);
-        setPluginStatus(id, 'error', `install command failed: ${inst.output.slice(-400)}`);
+    try {
+      const dir = plugin.dir || join(PLUGIN_DIR, id);
+      mkdirSync(dir, { recursive: true });
+      if (!existsSync(join(dir, '.git')) && readdirSync(dir).length) {
+        throw new Error(`${dir} is not empty and is not a git checkout`);
+      }
+      mkdirSync(logDir, { recursive: true });
+      writeFileSync(logPath(id), '');
+      log(id, `install start: ${plugin.repo} -> ${dir}`);
+      const options = { cwd: dir, timeoutMs: 240_000, onLine: (t: string) => log(id, t.trimEnd()) };
+      const clone = existsSync(join(dir, '.git'))
+        ? await runProcess('git', ['pull', '--ff-only'], options)
+        : await runProcess('git', ['clone', '--depth', '1', '--', plugin.repo, '.'], options);
+      if (clone.code !== 0) {
+        log(id, `clone failed (${clone.code})`);
+        setPluginStatus(id, 'error', `git clone failed: ${clone.output.slice(-400)}`);
         return;
       }
+      if (plugin.install_cmd.trim()) {
+        log(id, `install: ${plugin.install_cmd}`);
+        const inst = await runShell(plugin.install_cmd, { ...options, timeoutMs: 20 * 60_000 });
+        if (inst.code !== 0) {
+          log(id, `install command failed (${inst.code})`);
+          setPluginStatus(id, 'error', `install command failed: ${inst.output.slice(-400)}`);
+          return;
+        }
+      }
+      run('update plugins set installed_at = ?, dir = ? where id = ?', nowIso(), dir, id);
+      setPluginStatus(id, 'installed');
+      log(id, 'install done');
+    } catch (error) {
+      const message = `install failed: ${error instanceof Error ? error.message : String(error)}`;
+      log(id, message);
+      setPluginStatus(id, 'error', message);
     }
-    run('update plugins set installed_at = ?, dir = ? where id = ?', nowIso(), dir, id);
-    setPluginStatus(id, 'installed');
-    log(id, 'install done');
   })();
 
   return pluginById(id);
@@ -130,6 +122,11 @@ export function installPlugin(id: string): Plugin | undefined {
 export async function startPlugin(id: string): Promise<Plugin | undefined> {
   const plugin = pluginById(id);
   if (!plugin) return undefined;
+  if (plugin.status === 'installing') return plugin;
+  if (!plugin.installed_at) {
+    if (plugin.status !== 'error') setPluginStatus(id, 'error', 'connector is not installed; install it before starting');
+    return pluginById(id);
+  }
   if (!plugin.run_cmd.trim()) {
     setPluginStatus(id, 'error', 'no run command configured');
     return pluginById(id);
@@ -141,13 +138,24 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
   setPluginStatus(id, 'starting');
   log(id, `start: ${plugin.run_cmd}`);
 
-  const child = spawn('/bin/bash', ['-lc', plugin.run_cmd], {
-    cwd: dir,
-    env,
-    detached: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  let child: ReturnType<typeof spawnShell>;
+  const startFailed = (error: unknown) => {
+    const message = `start failed: ${error instanceof Error ? error.message : String(error)}`;
+    log(id, message);
+    setPluginStatus(id, 'error', message);
+  };
+  try {
+    child = spawnShell(plugin.run_cmd, { cwd: dir, env, detached: false });
+  } catch (error) {
+    startFailed(error);
+    return pluginById(id);
+  }
   children.set(id, child);
+  child.once('error', (error) => {
+    if (children.get(id) !== child) return;
+    children.delete(id);
+    startFailed(error);
+  });
   child.stdout?.on('data', (b) => log(id, b.toString().trimEnd()));
   child.stderr?.on('data', (b) => log(id, b.toString().trimEnd()));
   child.on('close', (code) => {
@@ -194,10 +202,10 @@ export async function startPlugin(id: string): Promise<Plugin | undefined> {
 export function stopPlugin(id: string): Plugin | undefined {
   const child = children.get(id);
   if (child) {
-    child.kill('SIGTERM');
+    killProcessTree(child);
     setTimeout(() => {
-      if (children.get(id) === child) child.kill('SIGKILL');
-    }, 4000);
+      killProcessTree(child, 'SIGKILL');
+    }, 4000).unref();
     children.delete(id);
   }
   setPluginStatus(id, 'stopped');

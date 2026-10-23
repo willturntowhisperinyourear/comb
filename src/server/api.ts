@@ -711,8 +711,12 @@ api.post('/setup', async (req, res) => {
     const preset = PROVIDER_PRESETS.find((p) => p.id === presetId);
     if (!preset) continue;
     const exists = get<any>('select id from upstreams where name = ?', preset.name);
-    if (exists) continue;
     const extra = Array.isArray(extras[presetId]) ? (extras[presetId] as unknown[]).map(String) : [];
+    if (exists) {
+      if (extra.length) addModels(exists.id, extra);
+      upstreams.push({ preset: preset.id, id: exists.id });
+      continue;
+    }
     const models = [...preset.models, ...extra].filter((m, i, list) => m && list.indexOf(m) === i);
     upstreams.push({ preset: preset.id, ...createUpstream({ preset: preset.id, models }) });
   }

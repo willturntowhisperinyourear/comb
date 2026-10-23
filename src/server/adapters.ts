@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { killProcessTree, spawnShell } from './process.ts';
 import { setting } from './db.ts';
 import {
   buildProtocol,
@@ -312,10 +312,16 @@ async function callCli(
 
   const { code, stdout, stderr } = await new Promise<{ code: number; stdout: string; stderr: string }>(
     (resolve) => {
-      const child = spawn('/bin/bash', ['-lc', template], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let child: ReturnType<typeof spawnShell>;
+      try {
+        child = spawnShell(template, { env });
+      } catch (error) {
+        resolve({ code: 1, stdout: '', stderr: String(error) });
+        return;
+      }
       let out = '';
       let err = '';
-      const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+      const timer = setTimeout(() => killProcessTree(child, 'SIGKILL'), timeout);
       child.stdout.on('data', (b) => (out += b.toString()));
       child.stderr.on('data', (b) => (err += b.toString()));
       child.on('close', (exitCode) => {

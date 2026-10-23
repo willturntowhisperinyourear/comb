@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { extractArchive, hoistSingleRoot, isArchiveName, safeJoin } from './archive.ts';
 
@@ -132,7 +132,7 @@ test('zip-slip entries are rejected and nothing is written outside the target', 
 test('absolute entry paths are treated as traversal', () => {
   assert.throws(() => safeJoin('/tmp/root', '/etc/passwd'), /path traversal blocked/);
   assert.throws(() => safeJoin('/tmp/root', '../../etc/passwd'), /path traversal blocked/);
-  assert.equal(safeJoin('/tmp/root', 'a/b.txt'), '/tmp/root/a/b.txt');
+  assert.equal(safeJoin('/tmp/root', 'a/b.txt'), resolve('/tmp/root', 'a/b.txt'));
 });
 
 test('tar and tar.gz archives extract, including a wrapper folder', () => {

@@ -221,6 +221,13 @@ function seed() {
   for (const p of PLUGIN_CATALOG) {
     run('update plugins set models_hint = ?, tools_hint = ? where id = ?', JSON.stringify(p.models_hint), p.tools_hint, p.id);
   }
+  // The old DeepSeek install launched its server and never completed. Migrate
+  // only that exact default so operator-edited commands are preserved.
+  run(
+    "update plugins set install_cmd = ? where id = 'deepseek-web' and install_cmd = ?",
+    PLUGIN_CATALOG.find((p) => p.id === 'deepseek-web')!.install_cmd,
+    'python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt  && ./.venv/bin/python app.py --port 8083',
+  );
 }
 seed();
 

@@ -18,8 +18,6 @@ export interface PluginSeed {
   tools_hint: ToolsMode;
 }
 
-const py = (entry: string, port: number, extra = '') =>
-  `python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt ${extra} && ./.venv/bin/python ${entry} --port ${port}`;
 const node = (start: string) => `npm install --omit=dev && ${start}`;
 
 export const PLUGIN_CATALOG: PluginSeed[] = [
@@ -60,7 +58,7 @@ export const PLUGIN_CATALOG: PluginSeed[] = [
     port: 8083,
     base_path: '/v1',
     auth_hint: 'One-time browser login in the connector UI; session cookies are cached on disk.',
-    install_cmd: py('app.py', 8083),
+    install_cmd: 'python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt',
     run_cmd: './.venv/bin/python app.py --port $PORT',
     models_hint: ['deepseek-chat', 'deepseek-reasoner'],
     tools_hint: 'emulate',
