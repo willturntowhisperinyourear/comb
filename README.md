@@ -64,7 +64,9 @@ Web sessions have no function calling. comb makes them behave as if they did.
 3. comb parses the block, repairs the usual model JSON mistakes, validates names against the declared tools, and returns real `tool_calls` with stringified arguments and `finish_reason: "tool_calls"`.
 4. On the next turn, `role: "tool"` messages are folded back into the transcript as `<tool_result>` blocks, so the model sees a coherent conversation.
 
-`POST /api/models/:id/recalibrate` probes one model with a dummy tool in every shape (native plus each variant), keeps the first shape that produced a valid, schema-valid call, and stores it. Native is preferred when the connector really forwards `tools`. This is the step to rerun after installing or updating a connector.
+`POST /api/models/:id/recalibrate` probes one model with a dummy tool in every shape (native plus each variant), keeps the first shape that produced a valid, schema-valid call, and stores it. Native is preferred when the connector really forwards `tools`. A text reply that merely contains a tool-shaped block does not count as native support.
+
+Emulated models carry a calibration state separate from their variant. They start `uncalibrated` with the `default_tool_variant` from Settings as a fallback, become `calibrated` once a probe passes, and `failed` when every shape fails. Native and `off` models are never queued for emulation calibration. The Models page shows the state, has a bulk **calibrate uncalibrated** action, and lets you add ids the connector never listed.
 
 Scope and limits:
 
@@ -72,6 +74,8 @@ Scope and limits:
 - Arguments are coerced into a parsed object and re-serialized, so clients get valid JSON.
 - Streaming for emulated providers is a buffered reply sliced into chunks, not token-by-token output. Native connectors stream for real.
 - Emulation cannot give a text-only model the ability to see tool output it never received; it works because the client sends results back on the next turn, exactly like the OpenAI API.
+
+**Refresh** on an upstream runs the same pipeline in one step: it asks the connector for its live model list, seeds the preset and connector ids when the connector is down or returns nothing, keeps every existing row and manual id, then calibrates only the emulated models that are uncalibrated or failed. Pass `force` to re-probe everything. Nothing is deleted.
 
 ## Routing
 

@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { all, createApiKey, get, nowIso, run, setting, setSetting } from './db.ts';
+import { all, createApiKey, get, nowIso, run, setting, setSetting, sha256 } from './db.ts';
 import { PROVIDER_PRESETS } from './catalog.ts';
 import {
+  calibrationFor,
+  defaultToolsMode,
   discoverModels,
   installPlugin,
   pluginById,
@@ -14,8 +16,8 @@ import {
   testModel,
 } from './plugins.ts';
 import { playgroundChat } from './proxy.ts';
-import { modelById, STRATEGIES } from './router.ts';
-import type { AdapterKind, AuthMode, Strategy } from '../shared/types.ts';
+import { modelById, STRATEGIES, upstreamById } from './router.ts';
+import type { AdapterKind, AuthMode, Strategy, ToolsMode } from '../shared/types.ts';
 
 export const api = Router();
 
@@ -39,7 +41,7 @@ api.get('/overview', (_req, res) => {
     dayAgo,
   );
   const models = all<any>(
-    `select m.id, m.tools_mode, m.tool_variant, m.enabled, u.name upstream, u.kind,
+    `select m.id, m.tools_mode, m.tool_variant, m.calibration_status, m.enabled, u.name upstream, u.kind,
             coalesce((select count(*) from usage x where x.model = m.id and x.ts > ?), 0) requests,
             coalesce((select sum(ok) from usage x where x.model = m.id and x.ts > ?), 0) ok,
             coalesce((select avg(latency_ms) from usage x where x.model = m.id and x.ts > ?), 0) latency,
@@ -70,6 +72,8 @@ api.get('/overview', (_req, res) => {
       active_upstreams: upstreams.filter((u) => u.status === 'active').length,
       models: models.length,
       emulated: models.filter((m) => m.tools_mode === 'emulate').length,
+      uncalibrated: models.filter((m) => m.tools_mode === 'emulate' && m.calibration_status !== 'calibrated')
+        .length,
       chains: Number(get<any>('select count(*) n from chains where enabled = 1')?.n ?? 0),
       running_plugins: runningPlugins().length,
     },
@@ -86,6 +90,11 @@ function createUpstream(input: any) {
   const adapter: AdapterKind = (input.adapter ?? preset?.adapter ?? 'openai-http') as AdapterKind;
   const auth_mode: AuthMode = (input.auth_mode ?? preset?.auth_mode ?? 'none') as AuthMode;
   const base_url = input.base_url ?? preset?.base_url ?? null;
+  const plugin_id = input.plugin_id ?? preset?.plugin_id ?? null;
+  const kind = input.kind ?? preset?.kind ?? 'api';
+  // Connector capability beats preset beats upstream kind.
+  const tools_mode: ToolsMode =
+    input.tools_mode ?? defaultToolsMode({ plugin_id, preset: preset?.id ?? input.preset ?? null, kind });
   const config =
     typeof input.config === 'string'
       ? input.config
@@ -101,8 +110,8 @@ function createUpstream(input: any) {
     id,
     name,
     input.preset ?? preset?.id ?? null,
-    input.kind ?? preset?.kind ?? 'api',
-    input.plugin_id ?? preset?.plugin_id ?? null,
+    kind,
+    plugin_id,
     adapter,
     base_url,
     input.api_key ?? null,
@@ -131,15 +140,18 @@ function createUpstream(input: any) {
     const modelId = `${slug}/${modelName}`;
     if (created.includes(modelId)) continue;
     run(
-      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
-       values(?,?,?,?,?,?,?,?,?) on conflict(id) do nothing`,
+      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant,
+         calibration_status, calibrated_at, caps, created_at)
+       values(?,?,?,?,?,?,?,?,?,?,?) on conflict(id) do nothing`,
       modelId,
       id,
       modelName,
       modelName,
       128000,
-      input.tools_mode ?? preset?.tools_mode ?? 'emulate',
+      tools_mode,
       setting('default_tool_variant', 'xml'),
+      calibrationFor(tools_mode),
+      null,
       '{}',
       nowIso(),
     );
@@ -211,6 +223,96 @@ api.post('/upstreams/:id/test', async (req, res) => {
 });
 
 /**
+ * Refresh one upstream: ask the connector what it serves now, keep every model
+ * row that already exists, seed the preset list when the connector is down or
+ * returns nothing, then calibrate only the emulated models that still need it.
+ */
+export async function refreshUpstream(upstreamId: string, force = false) {
+  const up = upstreamById(upstreamId);
+  if (!up) {
+    return {
+      error: 'upstream not found',
+      warnings: [] as string[],
+      discovered: [] as string[],
+      created: [] as string[],
+      existing: 0,
+      calibrated: 0,
+      failed: 0,
+      skipped: 0,
+    };
+  }
+
+  const preset = PROVIDER_PRESETS.find((p) => p.id === up.preset);
+  const plugin = up.plugin_id ? pluginById(up.plugin_id) : null;
+  const connectorRunning = plugin ? runningPlugins().includes(plugin.id) : false;
+  const warnings: string[] = [];
+
+  if (plugin && !connectorRunning) {
+    warnings.push(
+      `${plugin.name} is ${plugin.status}. Start it to discover live models; comb seeded the known ids instead.`,
+    );
+  }
+
+  let live: { discovered: string[]; created: string[]; error?: string } = { discovered: [], created: [] };
+  if (up.adapter === 'openai-http' && (!plugin || connectorRunning)) {
+    live = await discoverModels(up.id);
+    if (live.error) warnings.push(`live discovery failed: ${live.error}`);
+  } else if (!plugin) {
+    warnings.push('this upstream has no connector; live discovery was skipped');
+  }
+
+  let pluginSeed: string[] = [];
+  if (plugin) {
+    try {
+      const parsed = JSON.parse(plugin.models_hint || '[]');
+      if (Array.isArray(parsed)) pluginSeed = parsed.map(String);
+    } catch {
+      // A malformed hint is not worth failing the refresh over.
+    }
+  }
+  const seeded = addModels(up.id, [...(preset?.models ?? []), ...pluginSeed], defaultToolsMode(up));
+  if (!live.discovered.length && !seeded.created.length) {
+    warnings.push('nothing came back from discovery or the preset; add model ids by hand');
+  }
+
+  const rows = all<any>('select * from models where upstream_id = ? order by id', up.id);
+  // Probing a connector that is not running only produces "failed" noise, so
+  // refresh leaves those models uncalibrated until it is back up.
+  const canProbe = !plugin || connectorRunning;
+  if (!canProbe) {
+    warnings.push('calibration skipped while the connector is down; refresh again after starting it');
+  }
+  const candidates = canProbe
+    ? rows.filter((m) => m.tools_mode === 'emulate' && (force || m.calibration_status !== 'calibrated'))
+    : [];
+
+  let calibrated = 0;
+  let failed = 0;
+  for (const model of candidates) {
+    const report = await recalibrateModel(model.id);
+    if (report.status === 'calibrated') calibrated++;
+    else if (report.status === 'failed') failed++;
+  }
+
+  const created = [...new Set([...live.created, ...seeded.created])];
+  return {
+    discovered: live.discovered,
+    created,
+    existing: rows.length - created.length,
+    calibrated,
+    failed,
+    skipped: rows.length - candidates.length,
+    warnings,
+  };
+}
+
+api.post('/upstreams/:id/refresh', async (req, res) => {
+  const result = await refreshUpstream(req.params.id, !!req.body?.force);
+  if (result.error) return res.status(404).json(result);
+  res.json(result);
+});
+
+/**
  * Providers such as chat.qwen.ai hand a guest session its own quota. Dropping
  * the cookie jar makes the connector mint a fresh session on the next call.
  */
@@ -252,11 +354,9 @@ export function addModels(upstreamId: string, names: unknown, toolsMode?: string
   const up = get<any>('select * from upstreams where id = ?', upstreamId);
   if (!up) return { created: [] as string[], existing: [] as string[], invalid: [] as string[], error: 'upstream not found' };
   const slug = slugify(up.name);
-  const mode = ['native', 'emulate', 'off'].includes(String(toolsMode))
-    ? String(toolsMode)
-    : up.kind === 'api'
-      ? 'native'
-      : 'emulate';
+  const mode: ToolsMode = ['native', 'emulate', 'off'].includes(String(toolsMode))
+    ? (String(toolsMode) as ToolsMode)
+    : defaultToolsMode(up);
   const created: string[] = [];
   const existing: string[] = [];
   const invalid: string[] = [];
@@ -274,8 +374,9 @@ export function addModels(upstreamId: string, names: unknown, toolsMode?: string
       continue;
     }
     run(
-      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
-       values(?,?,?,?,?,?,?,?,?)`,
+      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant,
+         calibration_status, calibrated_at, caps, created_at)
+       values(?,?,?,?,?,?,?,?,?,?,?)`,
       id,
       up.id,
       name,
@@ -283,6 +384,8 @@ export function addModels(upstreamId: string, names: unknown, toolsMode?: string
       128000,
       mode,
       setting('default_tool_variant', 'xml'),
+      calibrationFor(mode),
+      null,
       JSON.stringify({ added_manually: true }),
       nowIso(),
     );
@@ -291,24 +394,84 @@ export function addModels(upstreamId: string, names: unknown, toolsMode?: string
   return { created, existing, invalid };
 }
 
-api.post('/models', (req, res) => {
+api.post('/models', async (req, res) => {
   const b = req.body ?? {};
   const names = b.names ?? b.name;
   if (!b.upstream_id) return res.status(400).json({ error: 'upstream_id is required' });
   if (!names || (Array.isArray(names) && !names.length)) return res.status(400).json({ error: 'names is required' });
   const result = addModels(b.upstream_id, names, b.tools_mode);
   if (result.error) return res.status(404).json({ error: result.error });
-  res.status(201).json(result);
+
+  const calibrations: { model: string; status: string | null; winner: unknown }[] = [];
+  if (b.calibrate) {
+    for (const id of result.created) {
+      const model = modelById(id);
+      if (model?.tools_mode !== 'emulate') continue;
+      const report = await recalibrateModel(id);
+      calibrations.push({ model: id, status: report.status, winner: report.winner });
+    }
+  }
+  res.status(201).json({
+    ...result,
+    calibrated: calibrations.filter((c) => c.status === 'calibrated').length,
+    failed: calibrations.filter((c) => c.status === 'failed').length,
+    calibrations,
+  });
+});
+
+/**
+ * Bulk calibration: every emulated model that has never passed a probe, or
+ * that failed a previous one. Native and off models are never queued.
+ */
+api.post('/models/calibrate', async (req, res) => {
+  const force = !!req.body?.force;
+  const upstreamId = typeof req.body?.upstream_id === 'string' ? req.body.upstream_id : null;
+  const where = ["tools_mode = 'emulate'"];
+  const params: string[] = [];
+  if (upstreamId) {
+    where.push('upstream_id = ?');
+    params.push(upstreamId);
+  }
+  if (!force) where.push("(calibration_status is null or calibration_status in ('uncalibrated','failed'))");
+  const rows = all<any>(`select * from models where ${where.join(' and ')} order by id`, ...params);
+
+  const results: { model: string; status: string | null; winner: unknown }[] = [];
+  for (const row of rows) {
+    const report = await recalibrateModel(row.id);
+    results.push({ model: row.id, status: report.status, winner: report.winner });
+  }
+  res.json({
+    calibrated: results.filter((r) => r.status === 'calibrated').length,
+    failed: results.filter((r) => r.status === 'failed').length,
+    skipped: Number(get<any>('select count(*) n from models')?.n ?? 0) - rows.length,
+    results,
+  });
 });
 
 api.patch('/models/:id', (req, res) => {
   const b = req.body ?? {};
+  const current = get<any>('select * from models where id = ?', req.params.id);
+  if (!current) return res.status(404).json({ error: 'model not found' });
   const fields: Record<string, unknown> = {};
+  const modeChanged = ['native', 'emulate', 'off'].includes(b.tools_mode) && b.tools_mode !== current.tools_mode;
+  const variantChanged = ['xml', 'fence', 'json'].includes(b.tool_variant) && b.tool_variant !== current.tool_variant;
   if (['native', 'emulate', 'off'].includes(b.tools_mode)) fields.tools_mode = b.tools_mode;
   if (['xml', 'fence', 'json'].includes(b.tool_variant)) fields.tool_variant = b.tool_variant;
   if (b.enabled !== undefined) fields.enabled = bool(b.enabled);
   if (b.context_window !== undefined) fields.context_window = num(b.context_window, 128000);
   if (b.display_name !== undefined) fields.display_name = b.display_name;
+
+  // Switching to emulation needs a fresh probe; picking a variant by hand is a
+  // deliberate lock, so it counts as calibrated.
+  const nextMode = (fields.tools_mode as string | undefined) ?? current.tools_mode;
+  if (modeChanged) {
+    fields.calibration_status = calibrationFor(nextMode);
+    fields.calibrated_at = nextMode === 'emulate' ? null : nowIso();
+  }
+  if (variantChanged && nextMode === 'emulate') {
+    fields.calibration_status = 'calibrated';
+    fields.calibrated_at = nowIso();
+  }
   const keys = Object.keys(fields);
   if (!keys.length) return res.json({ ok: true });
   run(
@@ -343,6 +506,12 @@ api.post('/chains', (req, res) => {
   const b = req.body ?? {};
   const name = String(b.name ?? '').trim();
   if (!name) return res.status(400).json({ error: 'name is required' });
+  if (name === 'auto') {
+    return res.status(409).json({ error: '"auto" is reserved for the router automatic ranking' });
+  }
+  if (modelById(name)) {
+    return res.status(409).json({ error: `a model already uses the id "${name}"` });
+  }
   if (get('select id from chains where name = ?', name)) {
     return res.status(409).json({ error: 'a chain with that name exists' });
   }
@@ -364,7 +533,17 @@ api.post('/chains', (req, res) => {
 api.patch('/chains/:id', (req, res) => {
   const b = req.body ?? {};
   const fields: Record<string, unknown> = {};
-  if (b.name !== undefined) fields.name = b.name;
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (name === 'auto') {
+      return res.status(409).json({ error: '"auto" is reserved for the router automatic ranking' });
+    }
+    if (modelById(name)) return res.status(409).json({ error: `a model already uses the id "${name}"` });
+    const clash = get<any>('select id from chains where name = ? and id != ?', name, req.params.id);
+    if (clash) return res.status(409).json({ error: 'a chain with that name exists' });
+    fields.name = name;
+  }
   if (b.strategy !== undefined && STRATEGIES.includes(b.strategy)) fields.strategy = b.strategy;
   if (b.members !== undefined) fields.members = JSON.stringify(b.members);
   if (b.description !== undefined) fields.description = b.description;
@@ -408,7 +587,11 @@ api.delete('/keys/:id', (req, res) => {
 });
 
 api.get('/bootstrap-key', (_req, res) => {
-  res.json({ key: setting('bootstrap_api_key', '') });
+  const key = setting('bootstrap_api_key', '');
+  // Only the bootstrap key's plaintext is recoverable, so clients cannot be
+  // shown another key after this one is revoked.
+  const row = key ? get<any>('select id from api_keys where hash = ? and revoked = 0', sha256(key)) : null;
+  res.json({ key, active: !!row });
 });
 
 // ------------------------------------------------------------------ plugins

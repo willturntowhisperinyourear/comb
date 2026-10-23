@@ -26,6 +26,7 @@ export default function UpstreamsPage() {
   const [open, setOpen] = useState<string | null>(null);
   const [edit, setEdit] = useState<Record<string, any>>({});
   const [newModels, setNewModels] = useState<Record<string, string>>({});
+  const [refreshing, setRefreshing] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null);
 
   const load = () => api.get('/upstreams').then(setUpstreams).catch(() => {});
@@ -67,6 +68,32 @@ export default function UpstreamsPage() {
     } catch (e: any) {
       setNotice({ text: e.message, bad: true });
     }
+  }
+
+  async function refresh(up: any) {
+    setRefreshing(up.id);
+    setNotice(null);
+    const res = await api
+      .post(`/upstreams/${up.id}/refresh`, {})
+      .catch((e) => ({ error: e.message, warnings: [e.message] }));
+    if (res.error) {
+      setNotice({ text: res.error, bad: true });
+    } else {
+      const parts = [
+        `${res.discovered.length} discovered`,
+        `${res.created.length} new`,
+        `${res.calibrated} calibrated`,
+        `${res.failed} failed`,
+        `${res.skipped} skipped`,
+      ];
+      const warnings = (res.warnings ?? []).join(' · ');
+      setNotice({
+        text: parts.join(' · ') + (warnings ? ` — ${warnings}` : ''),
+        bad: res.failed > 0 || (!!warnings && res.discovered.length === 0),
+      });
+    }
+    setRefreshing(null);
+    load();
   }
 
   async function discover(id: string) {
@@ -137,7 +164,7 @@ export default function UpstreamsPage() {
             </select>
           </Field>
           <Field label="name">
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Gemini Web" />
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="My upstream" />
           </Field>
           <Field label="kind">
             <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
@@ -153,13 +180,13 @@ export default function UpstreamsPage() {
             </select>
           </Field>
           <Field label="base url" hint="…/v1 of the connector or API">
-            <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder="http://127.0.0.1:8081/v1" />
+            <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder="https://api.example.com/v1" />
           </Field>
           <Field label="api key">
             <input value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-…" />
           </Field>
-          <Field label="cookie" hint="web sessions">
-            <input value={form.cookie} onChange={(e) => setForm({ ...form, cookie: e.target.value })} placeholder="__Secure-1PSID=…" />
+          <Field label="cookie" hint="web sessions, optional">
+            <input value={form.cookie} onChange={(e) => setForm({ ...form, cookie: e.target.value })} placeholder="session=…" />
           </Field>
           <Field label="models" hint="comma separated">
             <input value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} placeholder="gemini-2.5-pro, gemini-2.5-flash" />
@@ -322,6 +349,14 @@ export default function UpstreamsPage() {
                   </td>
                   <td>
                     <div className="inline">
+                      <Button
+                        variant="primary"
+                        onClick={() => refresh(u)}
+                        disabled={refreshing === u.id}
+                        title="discover live models, seed missing ids, calibrate emulated models that need it"
+                      >
+                        {refreshing === u.id ? 'refreshing…' : 'refresh'}
+                      </Button>
                       <Button onClick={() => discover(u.id)}>discover</Button>
                       <Button onClick={() => test(u.id)}>test</Button>
                       {u.reset_mode === 'cookie_reset' && (

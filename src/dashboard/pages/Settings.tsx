@@ -78,7 +78,7 @@ export default function SettingsPage() {
               onChange={(e) => set('request_timeout_ms', e.target.value)}
             />
           </Field>
-          <Field label="default tool variant" hint="for newly added models">
+          <Field label="default tool variant" hint="fallback for new emulated models until calibration picks one">
             <select
               value={settings.default_tool_variant ?? 'xml'}
               onChange={(e) => set('default_tool_variant', e.target.value)}

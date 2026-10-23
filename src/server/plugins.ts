@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DATA_DIR, get, nowIso, PLUGIN_DIR, run } from './db.ts';
+import { DATA_DIR, get, nowIso, PLUGIN_DIR, run, setting } from './db.ts';
+import { PROVIDER_PRESETS } from './catalog.ts';
 import type { Model, Plugin, ToolVariant } from '../shared/types.ts';
 import { probe } from './adapters.ts';
 import { modelById, upstreamById, type Candidate } from './router.ts';
@@ -32,6 +33,29 @@ export function pluginLog(id: string, lines = 120): string {
 export function pluginById(id: string): Plugin | undefined {
   return get<Plugin>('select * from plugins where id = ?', id);
 }
+
+/**
+ * Tool support comes from connector metadata first, then the upstream preset,
+ * and only then from the upstream kind. A connector that really forwards
+ * OpenAI `tools` must not be downgraded to emulation just because it is a web
+ * connector.
+ */
+export function defaultToolsMode(up: {
+  plugin_id?: string | null;
+  preset?: string | null;
+  kind?: string;
+}): 'native' | 'emulate' {
+  const plugin = up.plugin_id ? pluginById(up.plugin_id) : undefined;
+  if (plugin?.tools_hint === 'native' || plugin?.tools_hint === 'emulate') {
+    return plugin.tools_hint as 'native' | 'emulate';
+  }
+  const preset = up.preset ? PROVIDER_PRESETS.find((p) => p.id === up.preset) : undefined;
+  if (preset?.tools_mode === 'native' || preset?.tools_mode === 'emulate') return preset.tools_mode;
+  return up.kind === 'api' ? 'native' : 'emulate';
+}
+
+export const calibrationFor = (mode: string): 'uncalibrated' | null =>
+  mode === 'emulate' ? 'uncalibrated' : null;
 
 export function setPluginStatus(id: string, status: string, error: string | null = null) {
   run('update plugins set status = ?, last_error = ?, updated_at = ? where id = ?', status, error, nowIso(), id);
@@ -207,18 +231,21 @@ export async function discoverModels(upstreamId: string): Promise<{ discovered: 
     discovered.push(name);
     const id = `${slug}/${name}`;
     const existing = modelById(id);
-    const guessTools = up.kind === 'web' ? 'emulate' : 'native';
+    const mode = existing?.tools_mode ?? defaultToolsMode(up);
     run(
-      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
-       values(?,?,?,?,?,?,?,?,?)
+      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant,
+         calibration_status, calibrated_at, caps, created_at)
+       values(?,?,?,?,?,?,?,?,?,?,?)
        on conflict(id) do update set upstream_id = excluded.upstream_id`,
       id,
       up.id,
       name,
       name,
       Number(item?.context_length ?? item?.context_window ?? 128000) || 128000,
-      existing?.tools_mode ?? guessTools,
-      existing?.tool_variant ?? 'xml',
+      mode,
+      existing?.tool_variant ?? setting('default_tool_variant', 'xml'),
+      existing?.calibration_status ?? calibrationFor(mode),
+      existing?.calibrated_at ?? null,
       JSON.stringify({ discovered_from: 'models_endpoint' }),
       nowIso(),
     );
@@ -245,6 +272,7 @@ const probeTool = [
 export interface RecalibrationReport {
   model: string;
   winner: { mode: string; variant: ToolVariant | null } | null;
+  status: 'calibrated' | 'failed' | null;
   trials: { mode: string; variant: ToolVariant | null; ok: boolean; ms: number; note: string }[];
 }
 
@@ -256,9 +284,9 @@ export interface RecalibrationReport {
  */
 export async function recalibrateModel(modelId: string): Promise<RecalibrationReport> {
   const model = modelById(modelId);
-  if (!model) return { model: modelId, winner: null, trials: [] };
+  if (!model) return { model: modelId, winner: null, status: null, trials: [] };
   const upstream = upstreamById(model.upstream_id);
-  if (!upstream) return { model: modelId, winner: null, trials: [] };
+  if (!upstream) return { model: modelId, winner: null, status: null, trials: [] };
 
   const trials: RecalibrationReport['trials'] = [];
   const modes: { mode: 'native' | 'emulate'; variant: ToolVariant | null }[] = [
@@ -281,10 +309,15 @@ export async function recalibrateModel(modelId: string): Promise<RecalibrationRe
     let note = '';
     let ok = false;
     try {
-      const result = await probe(candidate, [
-        { role: 'system', content: 'You are a tool-calling probe. Follow the tool protocol exactly.' },
-        { role: 'user', content: 'Call ping once with value 42. No prose.' },
-      ], probeTool);
+      const result = await probe(
+        candidate,
+        [
+          { role: 'system', content: 'You are a tool-calling probe. Follow the tool protocol exactly.' },
+          { role: 'user', content: 'Call ping once with value 42. No prose.' },
+        ],
+        probeTool,
+        { nativeOnly: trial.mode === 'native' },
+      );
       const call = result.toolCalls[0];
       let args: any = null;
       try {
@@ -309,14 +342,19 @@ export async function recalibrateModel(modelId: string): Promise<RecalibrationRe
   const winner = passing[0] ?? null;
 
   if (winner) {
+    const status = winner.mode === 'emulate' ? 'calibrated' : null;
     run(
-      'update models set tools_mode = ?, tool_variant = ? where id = ?',
+      'update models set tools_mode = ?, tool_variant = ?, calibration_status = ?, calibrated_at = ? where id = ?',
       winner.mode,
       winner.variant ?? model.tool_variant,
+      status,
+      nowIso(),
       modelId,
     );
+    return { model: modelId, winner: { mode: winner.mode, variant: winner.variant }, status, trials };
   }
-  return { model: modelId, winner: winner ? { mode: winner.mode, variant: winner.variant } : null, trials };
+  run("update models set calibration_status = 'failed' where id = ? and tools_mode = 'emulate'", modelId);
+  return { model: modelId, winner: null, status: 'failed', trials };
 }
 
 /** Cheap connectivity check for a model, used by the dashboard's Test button. */

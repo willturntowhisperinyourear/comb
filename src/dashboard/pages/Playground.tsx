@@ -34,11 +34,24 @@ export default function PlaygroundPage() {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    Promise.all([api.get('/models'), api.get('/chains')])
-      .then(([models, chains]) => {
-        setTargets(['auto', ...chains.map((c: any) => c.name), ...models.map((m: any) => m.id)]);
-      })
-      .catch(() => {});
+    // Models and chains are edited on other pages; poll so a new chain shows up
+    // here without a reload.
+    let alive = true;
+    const loadTargets = () =>
+      Promise.all([api.get('/models'), api.get('/chains')])
+        .then(([models, chains]) => {
+          if (!alive) return;
+          const list = ['auto', ...chains.map((c: any) => c.name), ...models.map((m: any) => m.id)];
+          setTargets(list);
+          setModel((current) => (list.includes(current) ? current : 'auto'));
+        })
+        .catch(() => {});
+    loadTargets();
+    const timer = setInterval(loadTargets, 10000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
   }, []);
 
   async function send() {

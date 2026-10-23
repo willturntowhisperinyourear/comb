@@ -37,6 +37,8 @@ export interface UpstreamResult {
 export interface CallOptions {
   stream?: boolean;
   onText?: (delta: string) => void;
+  /** Probe mode: a reply that merely looks like a tool call in text does not count. */
+  nativeOnly?: boolean;
 }
 
 const estimateTokens = (s: string) => Math.ceil(s.length / 4);
@@ -235,7 +237,7 @@ async function callHttp(
 
   const parsedFallback = nativeCalls.length
     ? { text: content, calls: nativeCalls }
-    : tools.length && c.model.tools_mode !== 'off'
+    : !opts.nativeOnly && tools.length && c.model.tools_mode !== 'off'
       ? parseToolCalls(content, tools, c.model.tool_variant)
       : { text: content, calls: [] as ToolCall[] };
 
@@ -352,6 +354,11 @@ function fail(status: number, error: string): UpstreamResult {
 }
 
 /** Health probe used by the inspector and the emulation recalibration. */
-export async function probe(c: Candidate, messages: unknown[], tools?: unknown[]): Promise<UpstreamResult> {
-  return callUpstream(c, { model: c.model.id, messages, tools, stream: false });
+export async function probe(
+  c: Candidate,
+  messages: unknown[],
+  tools?: unknown[],
+  opts: CallOptions = {},
+): Promise<UpstreamResult> {
+  return callUpstream(c, { model: c.model.id, messages, tools, stream: false }, opts);
 }

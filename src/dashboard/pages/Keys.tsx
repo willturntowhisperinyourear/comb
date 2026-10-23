@@ -4,14 +4,14 @@ import { Badge, Button, CopyLine, Empty, Field, Panel } from '../ui.tsx';
 
 export default function KeysPage() {
   const [keys, setKeys] = useState<any[]>([]);
-  const [bootstrap, setBootstrap] = useState('');
+  const [bootstrap, setBootstrap] = useState<{ key: string; active: boolean }>({ key: '', active: false });
   const [created, setCreated] = useState<{ name: string; key: string } | null>(null);
   const [form, setForm] = useState({ name: 'client', rpm: 0, rpd: 0 });
   const [error, setError] = useState('');
 
   const load = () => {
     api.get('/keys').then(setKeys).catch(() => {});
-    api.get('/bootstrap-key').then((d) => setBootstrap(d.key)).catch(() => {});
+    api.get('/bootstrap-key').then(setBootstrap).catch(() => {});
   };
   useEffect(load, []);
 
@@ -30,9 +30,16 @@ export default function KeysPage() {
     <>
       {error && <div className="note bad">{error}</div>}
 
-      <Panel title="bootstrap key">
+      <Panel title="bootstrap key" actions={<Badge tone={bootstrap.active ? 'ok' : 'bad'}>{bootstrap.active ? 'active' : 'revoked'}</Badge>}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <CopyLine label="api key" value={bootstrap} />
+          {bootstrap.active ? (
+            <CopyLine label="api key" value={bootstrap.key} />
+          ) : (
+            <div className="note bad">
+              The bootstrap key was revoked. Requests that still send it get 401. Only this key's plaintext existed, so
+              create a new key below and paste it into your client configuration.
+            </div>
+          )}
           <div className="tiny muted">
             Created on first start, also written to <code>data/bootstrap-key.txt</code>. The dashboard itself is
             unauthenticated: keep it on loopback or behind your own proxy.

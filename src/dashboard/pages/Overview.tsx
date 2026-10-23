@@ -6,14 +6,14 @@ import type { PageId } from '../App.tsx';
 export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
   const [data, setData] = useState<any>(null);
   const [status, setStatus] = useState<any>(null);
-  const [key, setKey] = useState('');
+  const [bootstrap, setBootstrap] = useState<{ key: string; active: boolean } | null>(null);
 
   useEffect(() => {
     let alive = true;
     const load = () => {
       api.get('/overview').then((d) => alive && setData(d)).catch(() => {});
       api.get('/setup/status').then((d) => alive && setStatus(d)).catch(() => {});
-      api.get('/bootstrap-key').then((d) => alive && setKey(d.key)).catch(() => {});
+      api.get('/bootstrap-key').then((d) => alive && setBootstrap(d)).catch(() => {});
     };
     load();
     const t = setInterval(load, 5000);
@@ -51,8 +51,8 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
         <Stat
           label="emulated tools"
           value={counts.emulated ?? 0}
-          hint={`of ${counts.models ?? 0} models`}
-          tone={counts.emulated ? 'ok' : undefined}
+          hint={`${counts.uncalibrated ?? 0} uncalibrated of ${counts.models ?? 0}`}
+          tone={counts.uncalibrated ? 'warn' : counts.emulated ? 'ok' : undefined}
         />
         <Stat label="connectors" value={counts.running_plugins ?? 0} hint={`${counts.upstreams ?? 0} upstreams`} />
       </div>
@@ -86,7 +86,12 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
                       <td>
                         <Badge tone={m.tools_mode === 'native' ? 'blue' : m.tools_mode === 'emulate' ? 'ok' : 'idle'}>
                           {m.tools_mode === 'emulate' ? `emu:${m.tool_variant}` : m.tools_mode}
-                        </Badge>
+                        </Badge>{' '}
+                        {m.tools_mode === 'emulate' && m.calibration_status !== 'calibrated' && (
+                          <Badge tone={m.calibration_status === 'failed' ? 'bad' : 'warn'}>
+                            {m.calibration_status === 'failed' ? 'failed' : 'uncal'}
+                          </Badge>
+                        )}
                       </td>
                       <td className="num">{m.requests}</td>
                       <td className="num">{pct(Number(m.ok ?? 0), Number(m.requests ?? 0))}%</td>
@@ -105,9 +110,19 @@ export default function OverviewPage({ go }: { go: (p: PageId) => void }) {
           <Panel title="quick start">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <CopyLine label="base url" value={base} />
-              <CopyLine label="api key" value={key || 'loading'} />
+              {bootstrap?.active ? (
+                <CopyLine label="api key" value={bootstrap.key} />
+              ) : bootstrap ? (
+                <div className="note bad">
+                  The bootstrap key is revoked, so this snippet would get 401. Create a key in{' '}
+                  <a href="#keys" onClick={() => go('keys')}>
+                    API keys
+                  </a>{' '}
+                  and use that one.
+                </div>
+              ) : null}
               <pre className="tiny">{`curl ${base}/chat/completions \\
-  -H "authorization: Bearer ${key || '<key>'}" \\
+  -H "authorization: Bearer ${bootstrap?.active ? bootstrap.key : '<your comb key>'}" \\
   -H "content-type: application/json" \\
   -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}'`}</pre>
               <div className="tiny muted">

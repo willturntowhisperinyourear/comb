@@ -46,8 +46,12 @@ export default function RoutingPage() {
 
   async function create() {
     setError('');
-    if (!form.name.trim()) return setError('give the chain a name');
-    await api.post('/chains', form).catch((e) => setError(e.message));
+    const name = form.name.trim();
+    if (!name) return setError('give the chain a name');
+    if (name === 'auto') return setError('"auto" is reserved for the router automatic ranking');
+    if (models.some((m) => m.id === name)) return setError(`a model already uses the id "${name}"`);
+    if (chains.some((c) => c.name === name)) return setError('a chain with that name exists');
+    await api.post('/chains', { ...form, name }).catch((e) => setError(e.message));
     setForm({ name: '', strategy: 'priority', description: '' });
     load();
   }
@@ -92,7 +96,8 @@ export default function RoutingPage() {
       <div className="note info">
         A chain is a model id clients can call. Requests walk the member list using the strategy, failing over on
         errors, rate limits and cooldowns. Call it as <code>model: "&lt;chain name&gt;"</code>, or use{' '}
-        <code>auto</code> to rank every enabled model by health.
+        <code>auto</code> to rank every enabled model by health. Names <code>auto</code> and existing model ids are
+        reserved.
       </div>
 
       <Panel title="new chain">

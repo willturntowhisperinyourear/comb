@@ -33,9 +33,17 @@ export default function SetupPage({ done }: { done: () => void }) {
     return next;
   };
 
+  // Step 1 and step 2 mirror each other: queueing an upstream must queue the
+  // connector it runs on, and queueing a connector must queue its upstream.
   const pickPreset = (preset: any) => {
     setPickedPresets((s) => toggle(s, preset.id));
     if (preset.plugin_id) setPicked((s) => new Set(s).add(preset.plugin_id));
+  };
+
+  const pickPlugin = (id: string) => {
+    setPicked((s) => toggle(s, id));
+    const preset = presets.find((p) => p.plugin_id === id);
+    if (preset) setPickedPresets((s) => new Set(s).add(preset.id));
   };
 
   async function waitForPlugin(id: string, wanted: string[], seconds = 150) {
@@ -79,36 +87,31 @@ export default function SetupPage({ done }: { done: () => void }) {
         else add(`${p.id}: installed`, 'ok');
       }
 
+      const created = new Set<string>(res.upstreams.map((u: any) => u.id));
       const upstreams = await api.get<any[]>('/upstreams');
-      for (const up of upstreams) {
-        if (!up.plugin_id) continue;
-        add(`starting connector for ${up.name}…`);
-        await api.post(`/api/plugins/${up.plugin_id}/start`).catch((e) => add(`start failed: ${e.message}`, 'err'));
-        const run = await waitForPlugin(up.plugin_id, ['running', 'error', 'stopped'], 60);
-        if (!run || run.status === 'error') {
-          add(`${up.plugin_id}: not running (${run?.last_error ?? 'timeout'}) — check its log`, 'err');
+      for (const up of upstreams.filter((u) => created.has(u.id))) {
+        if (up.plugin_id) {
+          add(`starting connector for ${up.name}…`);
+          await api.post(`/plugins/${up.plugin_id}/start`).catch((e) => add(`start failed: ${e.message}`, 'err'));
+          const started = await waitForPlugin(up.plugin_id, ['running', 'error', 'stopped'], 60);
+          if (!started || started.status !== 'running') {
+            add(`${up.plugin_id}: not running (${started?.last_error ?? 'timeout'}) — seeding model ids anyway`, 'err');
+          } else {
+            add(`${up.plugin_id}: running`, 'ok');
+          }
+        }
+        const refresh = await api
+          .post(`/upstreams/${up.id}/refresh`, {})
+          .catch((e) => ({ error: e.message, warnings: [e.message] }));
+        if (refresh.error) {
+          add(`refresh ${up.name}: ${refresh.error}`, 'err');
           continue;
         }
-        add(`${up.plugin_id}: running`, 'ok');
-        const discovery = await api
-          .post(`/api/upstreams/${up.id}/discover`)
-          .catch((e) => ({ error: e.message, created: [] as string[] }));
-        if (discovery.error) add(`discover ${up.name}: ${discovery.error}`, 'err');
-        else add(`discover ${up.name}: ${discovery.created.length} new model(s)`, 'ok');
-      }
-
-      const models = await api.get<any[]>('/models');
-      const emulated = models.filter((m) => m.tools_mode === 'emulate');
-      add(`calibrating tool emulation for ${emulated.length} model(s)…`);
-      for (const m of emulated) {
-        const report = await api.post(`/api/models/${encodeURIComponent(m.id)}/recalibrate`).catch((e) => null);
-        if (!report) {
-          add(`${m.id}: calibration failed`, 'err');
-          continue;
-        }
-        const winner = report.winner;
-        if (winner) add(`${m.id}: tools via ${winner.mode}${winner.variant ? ':' + winner.variant : ''}`, 'ok');
-        else add(`${m.id}: no variant produced a valid tool call`, 'err');
+        add(
+          `${up.name}: ${refresh.discovered.length} discovered · ${refresh.created.length} new · ${refresh.calibrated} calibrated · ${refresh.failed} failed`,
+          refresh.failed ? 'err' : 'ok',
+        );
+        for (const warning of refresh.warnings ?? []) add(`  ${warning}`, 'err');
       }
       add('setup finished. Review Models and Routing, then send a request from the Playground.', 'ok');
     } catch (err: any) {
@@ -138,6 +141,9 @@ export default function SetupPage({ done }: { done: () => void }) {
           </span>
         }
       >
+        <div className="tiny muted" style={{ marginBottom: 10 }}>
+          Selecting a connector also queues its upstream in step 2, and the other way round.
+        </div>
         {KINDS.map((kind) => {
           const rows = plugins.filter((p) => p.kind === kind.id);
           if (!rows.length) return null;
@@ -152,7 +158,7 @@ export default function SetupPage({ done }: { done: () => void }) {
                   <div
                     key={p.id}
                     className={`connector ${picked.has(p.id) ? 'selected' : ''}`}
-                    onClick={() => setPicked((s) => toggle(s, p.id))}
+                    onClick={() => pickPlugin(p.id)}
                     style={{ cursor: 'pointer' }}
                   >
                     <div className="connector-head">

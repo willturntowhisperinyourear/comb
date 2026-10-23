@@ -106,6 +106,10 @@ export default function ConnectorsPage() {
           </div>
         )}
 
+        <div className="tiny muted" style={{ marginBottom: 10 }}>
+          tools is the connector's capability: <b>native</b> means it forwards OpenAI tool calls, <b>emulate</b>{' '}
+          means comb injects the tool protocol and parses the calls back out.
+        </div>
         <div className="tbl-scroll">
           <table>
             <thead>
@@ -170,7 +174,9 @@ export default function ConnectorsPage() {
                     <Badge tone={statusTone(p.status)}>{p.status}</Badge>
                   </td>
                   <td className="num muted tiny">{p.port ?? '—'}</td>
-                  <td className="tiny muted">{p.tools_hint}</td>
+                  <td className="tiny muted">
+                    <Badge tone={p.tools_hint === 'native' ? 'blue' : 'idle'}>{p.tools_hint}</Badge>
+                  </td>
                   <td>
                     <div className="inline">
                       <Button onClick={() => act(p.id, 'install')} disabled={p.status === 'installing'}>

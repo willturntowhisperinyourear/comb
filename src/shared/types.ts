@@ -34,7 +34,8 @@ export interface Plugin {
   auth_hint: string;
   install_cmd: string;
   run_cmd: string;
-  models_hint: string[];
+  /** JSON string[] in the database, kept raw so plugin rows round-trip. */
+  models_hint: string;
   tools_hint: ToolsMode;
   status: PluginStatus;
   dir: string;
@@ -74,6 +75,8 @@ export interface Model {
   context_window: number;
   tools_mode: ToolsMode;
   tool_variant: ToolVariant;
+  calibration_status: 'uncalibrated' | 'calibrated' | 'failed' | null;
+  calibrated_at: string | null;
   caps: string;
   enabled: number;
   created_at: string;

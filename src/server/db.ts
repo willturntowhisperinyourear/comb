@@ -69,6 +69,10 @@ create table if not exists models (
   context_window integer not null default 128000,
   tools_mode text not null default 'emulate',
   tool_variant text not null default 'xml',
+  -- null for native/off models; emulated models start uncalibrated and are
+  -- promoted to calibrated only after a probe produced a valid tool call.
+  calibration_status text,
+  calibrated_at text,
   caps text not null default '{}',
   enabled integer not null default 1,
   created_at text not null
@@ -120,6 +124,19 @@ create table if not exists cooldowns (
   reason text
 );
 `);
+
+// Existing databases predate the calibration columns; add them in place and
+// mark current emulated models as uncalibrated so a refresh picks them up.
+{
+  const columns = db.prepare('pragma table_info(models)').all() as { name: string }[];
+  if (!columns.some((c) => c.name === 'calibration_status')) {
+    db.exec('alter table models add column calibration_status text');
+    db.exec('alter table models add column calibrated_at text');
+    db.exec(
+      "update models set calibration_status = case when tools_mode = 'emulate' then 'uncalibrated' else null end",
+    );
+  }
+}
 
 export const nowIso = () => new Date().toISOString();
 
@@ -198,6 +215,11 @@ function seed() {
       join(PLUGIN_DIR, p.id),
       nowIso(),
     );
+  }
+  // Capability hints must follow the code, not the user: discovery and refresh
+  // read them to decide native versus emulated tools.
+  for (const p of PLUGIN_CATALOG) {
+    run('update plugins set models_hint = ?, tools_hint = ? where id = ?', JSON.stringify(p.models_hint), p.tools_hint, p.id);
   }
 }
 seed();

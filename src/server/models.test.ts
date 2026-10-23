@@ -26,6 +26,8 @@ test('adds the ids a connector does not list yet', () => {
   const model = db.get<any>('select * from models where id = ?', 'qwen-web/qwen3.5-max');
   assert.equal(model.upstream_model, 'qwen3.5-max');
   assert.equal(model.tools_mode, 'emulate');
+  assert.equal(model.calibration_status, 'uncalibrated', 'emulated models start unproven');
+  assert.equal(model.tool_variant, 'xml', 'the settings default is used as a fallback variant');
 });
 
 test('skips duplicates and reports them instead of failing the request', () => {
@@ -51,7 +53,9 @@ test('defaults to native tools for api upstreams and takes an override', () => {
     assert.equal(db.get<any>('select tools_mode from models where id = ?', modelId).tools_mode, 'emulate');
   }
   const native = addModels(id, ['gpt-9-nano']);
-  assert.equal(db.get<any>('select tools_mode from models where id = ?', native.created[0]).tools_mode, 'native');
+  const nativeRow = db.get<any>('select tools_mode, calibration_status from models where id = ?', native.created[0]);
+  assert.equal(nativeRow.tools_mode, 'native');
+  assert.equal(nativeRow.calibration_status, null, 'native models are never queued for emulation calibration');
 });
 
 test('an unknown upstream is an error, not a crash', () => {

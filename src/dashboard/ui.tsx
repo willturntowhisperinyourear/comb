@@ -34,8 +34,20 @@ export function Stat({ label, value, hint, tone }: { label: string; value: React
   );
 }
 
-export function Badge({ children, tone = 'idle' }: { children: ReactNode; tone?: 'ok' | 'warn' | 'bad' | 'idle' | 'blue' }) {
-  return <span className={`badge ${tone}`}>{children}</span>;
+export function Badge({
+  children,
+  tone = 'idle',
+  title,
+}: {
+  children: ReactNode;
+  tone?: 'ok' | 'warn' | 'bad' | 'idle' | 'blue';
+  title?: string;
+}) {
+  return (
+    <span className={`badge ${tone}`} title={title}>
+      {children}
+    </span>
+  );
 }
 
 export function Button({
