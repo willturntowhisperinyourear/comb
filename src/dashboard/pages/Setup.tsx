@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.ts';
-import { Badge, Button, Empty, Panel, statusTone } from '../ui.tsx';
+import { Badge, Button, Empty, Field, Panel, statusTone } from '../ui.tsx';
 
 type Line = { text: string; tone?: 'ok' | 'err' };
 
@@ -17,6 +17,7 @@ export default function SetupPage({ done }: { done: () => void }) {
   const [presets, setPresets] = useState<any[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [pickedPresets, setPickedPresets] = useState<Set<string>>(new Set());
+  const [extras, setExtras] = useState<Record<string, string>>({});
   const [lines, setLines] = useState<Line[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -54,7 +55,20 @@ export default function SetupPage({ done }: { done: () => void }) {
     add(`install queue: ${[...picked].join(', ') || 'none'}`);
     add(`upstreams to create: ${[...pickedPresets].join(', ') || 'none'}`);
     try {
-      const res = await api.post('/setup', { install: [...picked], create: [...pickedPresets] });
+      const extraModels = Object.fromEntries(
+        Object.entries(extras).map(([id, value]) => [
+          id,
+          value
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+        ]),
+      );
+      const res = await api.post('/setup', {
+        install: [...picked],
+        create: [...pickedPresets],
+        models: extraModels,
+      });
       add(`queued ${res.installed.length} install(s), created ${res.upstreams.length} upstream(s)`, 'ok');
 
       for (const p of res.installed) {
@@ -202,6 +216,31 @@ export default function SetupPage({ done }: { done: () => void }) {
             </div>
           ))}
         </div>
+
+        {pickedPresets.size > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div className="split-note" style={{ marginBottom: 8 }}>
+              <Badge tone="blue">extra models</Badge>
+              <span>
+                connectors ship an older model list than the provider serves; add the newer ids here and they are
+                created with the upstream
+              </span>
+            </div>
+            <div className="form-grid">
+              {presets
+                .filter((p) => pickedPresets.has(p.id))
+                .map((p) => (
+                  <Field key={p.id} label={p.name} hint="comma separated">
+                    <input
+                      value={extras[p.id] ?? ''}
+                      onChange={(e) => setExtras((s) => ({ ...s, [p.id]: e.target.value }))}
+                      placeholder="qwen3.5-max"
+                    />
+                  </Field>
+                ))}
+            </div>
+          </div>
+        )}
       </Panel>
 
       <Panel

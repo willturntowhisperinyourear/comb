@@ -14,7 +14,7 @@ import {
   testModel,
 } from './plugins.ts';
 import { playgroundChat } from './proxy.ts';
-import { STRATEGIES } from './router.ts';
+import { modelById, STRATEGIES } from './router.ts';
 import type { AdapterKind, AuthMode, Strategy } from '../shared/types.ts';
 
 export const api = Router();
@@ -124,8 +124,12 @@ function createUpstream(input: any) {
     : (preset?.models ?? []);
   const slug = slugify(name);
   const created: string[] = [];
-  for (const modelName of modelNames) {
+  for (const raw of modelNames) {
+    // Same normalisation as addModels: accept a full id, reject whitespace.
+    const modelName = String(raw).trim().replace(new RegExp(`^${slug}/`), '');
+    if (!modelName || /\s/.test(modelName)) continue;
     const modelId = `${slug}/${modelName}`;
+    if (created.includes(modelId)) continue;
     run(
       `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
        values(?,?,?,?,?,?,?,?,?) on conflict(id) do nothing`,
@@ -238,26 +242,63 @@ api.get('/models', (_req, res) => {
   );
 });
 
+/**
+ * Adds model ids by hand. Connectors lag behind the provider: a web2api repo
+ * may still list last quarter's ids, while the web app already serves a new
+ * one. Nothing upstream has to know the model name, so the operator can just
+ * type it in and comb will route to it.
+ */
+export function addModels(upstreamId: string, names: unknown, toolsMode?: string) {
+  const up = get<any>('select * from upstreams where id = ?', upstreamId);
+  if (!up) return { created: [] as string[], existing: [] as string[], invalid: [] as string[], error: 'upstream not found' };
+  const slug = slugify(up.name);
+  const mode = ['native', 'emulate', 'off'].includes(String(toolsMode))
+    ? String(toolsMode)
+    : up.kind === 'api'
+      ? 'native'
+      : 'emulate';
+  const created: string[] = [];
+  const existing: string[] = [];
+  const invalid: string[] = [];
+
+  const list = Array.isArray(names) ? names : [names];
+  for (const raw of list) {
+    const name = String(raw ?? '').trim().replace(new RegExp(`^${slug}/`), '');
+    if (!name || /\s/.test(name)) {
+      if (String(raw ?? '').trim()) invalid.push(String(raw));
+      continue;
+    }
+    const id = `${slug}/${name}`;
+    if (modelById(id)) {
+      if (!existing.includes(id)) existing.push(id);
+      continue;
+    }
+    run(
+      `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
+       values(?,?,?,?,?,?,?,?,?)`,
+      id,
+      up.id,
+      name,
+      name,
+      128000,
+      mode,
+      setting('default_tool_variant', 'xml'),
+      JSON.stringify({ added_manually: true }),
+      nowIso(),
+    );
+    created.push(id);
+  }
+  return { created, existing, invalid };
+}
+
 api.post('/models', (req, res) => {
   const b = req.body ?? {};
-  if (!b.upstream_id || !b.name) return res.status(400).json({ error: 'upstream_id and name are required' });
-  const up = get<any>('select * from upstreams where id = ?', b.upstream_id);
-  if (!up) return res.status(404).json({ error: 'upstream not found' });
-  const id = b.id ?? `${slugify(up.name)}/${b.name}`;
-  run(
-    `insert into models(id, upstream_id, upstream_model, display_name, context_window, tools_mode, tool_variant, caps, created_at)
-     values(?,?,?,?,?,?,?,?,?)`,
-    id,
-    up.id,
-    b.name,
-    b.display_name ?? b.name,
-    num(b.context_window, 128000),
-    b.tools_mode ?? 'emulate',
-    b.tool_variant ?? setting('default_tool_variant', 'xml'),
-    '{}',
-    nowIso(),
-  );
-  res.status(201).json({ id });
+  const names = b.names ?? b.name;
+  if (!b.upstream_id) return res.status(400).json({ error: 'upstream_id is required' });
+  if (!names || (Array.isArray(names) && !names.length)) return res.status(400).json({ error: 'names is required' });
+  const result = addModels(b.upstream_id, names, b.tools_mode);
+  if (result.error) return res.status(404).json({ error: result.error });
+  res.status(201).json(result);
 });
 
 api.patch('/models/:id', (req, res) => {
@@ -508,6 +549,9 @@ api.post('/playground', async (req, res) => {
 api.post('/setup', async (req, res) => {
   const install: string[] = Array.isArray(req.body?.install) ? req.body.install : [];
   const create: string[] = Array.isArray(req.body?.create) ? req.body.create : [];
+  // Extra ids per preset: connectors often ship an older model list than the
+  // provider actually serves today.
+  const extras = (req.body?.models ?? {}) as Record<string, unknown>;
   const plugins = install.map((id) => installPlugin(id)).filter(Boolean);
   const upstreams: any[] = [];
   for (const presetId of create) {
@@ -515,7 +559,9 @@ api.post('/setup', async (req, res) => {
     if (!preset) continue;
     const exists = get<any>('select id from upstreams where name = ?', preset.name);
     if (exists) continue;
-    upstreams.push({ preset: preset.id, ...createUpstream({ preset: preset.id }) });
+    const extra = Array.isArray(extras[presetId]) ? (extras[presetId] as unknown[]).map(String) : [];
+    const models = [...preset.models, ...extra].filter((m, i, list) => m && list.indexOf(m) === i);
+    upstreams.push({ preset: preset.id, ...createUpstream({ preset: preset.id, models }) });
   }
   res.json({
     installed: plugins.map((p: any) => ({ id: p.id, status: p.status })),

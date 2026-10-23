@@ -25,6 +25,7 @@ export default function UpstreamsPage() {
   const [form, setForm] = useState<any>(blank);
   const [open, setOpen] = useState<string | null>(null);
   const [edit, setEdit] = useState<Record<string, any>>({});
+  const [newModels, setNewModels] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null);
 
   const load = () => api.get('/upstreams').then(setUpstreams).catch(() => {});
@@ -86,6 +87,24 @@ export default function UpstreamsPage() {
   async function reset(id: string) {
     const r = await api.post(`/upstreams/${id}/reset-session`).catch((e) => ({ message: e.message, bad: true }));
     setNotice({ text: r.message, bad: (r as any).bad });
+    load();
+  }
+
+  async function addModel(up: any) {
+    const names = (newModels[up.id] ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!names.length) return;
+    const res = await api.post('/models', { upstream_id: up.id, names }).catch((e) => ({ error: e.message }));
+    if (res.error) setNotice({ text: res.error, bad: true });
+    else
+      setNotice({
+        text: `added ${res.created.length} model(s)${res.existing?.length ? `, ${res.existing.length} already present` : ''}${
+          res.invalid?.length ? `, skipped ${res.invalid.length} invalid` : ''
+        }`,
+      });
+    setNewModels((s) => ({ ...s, [up.id]: '' }));
     load();
   }
 
@@ -273,6 +292,19 @@ export default function UpstreamsPage() {
                         </div>
                         <div className="tiny muted">
                           models: {u.models.length ? u.models.map((m: any) => m.id).join(', ') : 'none discovered yet'}
+                        </div>
+                        <div className="form-row">
+                          <Field
+                            label="add model"
+                            hint="the connector lists old ids? type the new model id and comb will route to it"
+                          >
+                            <input
+                              value={newModels[u.id] ?? ''}
+                              onChange={(e) => setNewModels((s) => ({ ...s, [u.id]: e.target.value }))}
+                              placeholder="qwen3.5-max, gemini-3-pro"
+                            />
+                          </Field>
+                          <Button onClick={() => addModel(u)}>add</Button>
                         </div>
                         {u.plugin && (
                           <div className="tiny muted">

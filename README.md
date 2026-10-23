@@ -49,6 +49,8 @@ The catalog ships with these (all third-party, all unofficial):
 | gpt-load | api2api | [tbphp/gpt-load](https://github.com/tbphp/gpt-load) | provider keys / OAuth pools |
 | LLM API Key Proxy | api2api | [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-API-Key-Proxy) | numbered env keys |
 
+Connectors ship a fixed model list and fall behind the provider. Add the newer ids yourself: the setup wizard takes extra ids per upstream, and each upstream has an **add model** field in the panel. comb routes an id the connector never advertised; if the provider rejects it, normal failover applies.
+
 You are not limited to the catalog. **Connectors → add custom repo** takes a git URL plus install and run commands. You can also skip connectors entirely and point an upstream at any OpenAI-compatible URL, or at a CLI on this host (`cli-spawn` adapter, `$COMB_PROMPT` / `$COMB_MODEL` in the command).
 
 Install commands run as your user with git, npm, python and go available. Only install repos you trust.
